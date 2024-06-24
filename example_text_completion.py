@@ -5,6 +5,10 @@ import fire
 
 from llama import Llama
 from typing import List
+import torch
+from datetime import datetime
+# import nvidia_dlprof_pytorch_nvtx as nvtx
+# nvtx.init(enable_function_stack=True)
 
 def main(
     ckpt_dir: str,
@@ -66,4 +70,5 @@ def main(
 
 
 if __name__ == "__main__":
+    print(f"Started at: {datetime.now()}")
     fire.Fire(main)

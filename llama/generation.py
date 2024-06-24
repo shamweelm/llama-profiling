@@ -18,6 +18,10 @@ from fairscale.nn.model_parallel.initialize import (
 
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
+from datetime import datetime
+import nvidia_dlprof_pytorch_nvtx as nvtx
+nvtx.init(enable_function_stack=True)
+import autonvtx
 
 Role = Literal["system", "user", "assistant"]
 
@@ -118,6 +122,8 @@ class Llama:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
+        model = autonvtx(model)
+        
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
         return Llama(model, tokenizer)
@@ -262,14 +268,19 @@ class Llama:
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        generation_tokens, generation_logprobs = self.generate(
-            prompt_tokens=prompt_tokens,
-            max_gen_len=max_gen_len,
-            temperature=temperature,
-            top_p=top_p,
-            logprobs=logprobs,
-            echo=echo,
-        )
+        print(f"Time: {datetime.now()} - Starting generation")
+        torch.cuda.profiler.start()
+        with torch.autograd.profiler.emit_nvtx():
+            generation_tokens, generation_logprobs = self.generate(
+                prompt_tokens=prompt_tokens,
+                max_gen_len=max_gen_len,
+                temperature=temperature,
+                top_p=top_p,
+                logprobs=logprobs,
+                echo=echo,
+            )
+        torch.cuda.profiler.stop()
+        print(f"Time: {datetime.now()} - Generation complete")
         if logprobs:
             return [
                 {
@@ -392,7 +403,7 @@ class Llama:
                 }
             }
             for t, unsafe in zip(generation_tokens, unsafe_requests)
-        ]
+        ]    
 
 
 def sample_top_p(probs, p):

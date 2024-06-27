@@ -19,8 +19,8 @@ from fairscale.nn.model_parallel.initialize import (
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
 from datetime import datetime
-import nvidia_dlprof_pytorch_nvtx as nvtx
-nvtx.init(enable_function_stack=True)
+# import nvidia_dlprof_pytorch_nvtx as nvtx
+# nvtx.init(enable_function_stack=True)
 import autonvtx
 
 Role = Literal["system", "user", "assistant"]

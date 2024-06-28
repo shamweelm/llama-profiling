@@ -69,6 +69,7 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
 
 def main(**kwargs):
     # Update the configuration for the training and sharding process
+    torch.cuda.profiler.start()
     train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
     update_config((train_config, fsdp_config), **kwargs)
     
@@ -295,6 +296,8 @@ def main(**kwargs):
         if train_config.use_wandb:
             for k,v in results.items():
                 wandb_run.summary[k] = v
+                
+    torch.cuda.profiler.stop()
 
 if __name__ == "__main__":
     fire.Fire(main)

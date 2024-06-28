@@ -99,12 +99,12 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
             total_train_steps += 1
             
             # Start CUDA profiling for the first few steps
-            if total_train_steps == 0:
-                torch.cuda.profiler.start()
+            # if total_train_steps == 0:
+            #     torch.cuda.profiler.start()
             
             # stop when the maximum number of training steps is reached
             if train_config.max_train_step > 0 and total_train_steps > train_config.max_train_step:
-                torch.cuda.profiler.stop()
+                # torch.cuda.profiler.stop()
                 max_steps_reached = True
                 if not train_config.enable_fsdp or local_rank==0:
                     print("max training steps reached, stopping training, total train steps finished: ", total_train_steps-1)

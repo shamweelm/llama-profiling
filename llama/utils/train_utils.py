@@ -50,7 +50,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
 
     Returns: results dictionary containing average training and validation perplexity and loss
     """
-    model = autonvtx(model)
+    # model = autonvtx(model)
     
     # Create a gradient scaler for fp16
     if train_config.use_fp16 and train_config.enable_fsdp:

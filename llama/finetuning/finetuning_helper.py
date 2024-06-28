@@ -48,6 +48,7 @@ from llama.utils.train_utils import (
     get_policies,
 )
 from accelerate.utils import is_xpu_available
+import autonvtx
 
 def setup_wandb(train_config, fsdp_config, **kwargs):
     try:
@@ -133,6 +134,8 @@ def main(**kwargs):
             use_cache=use_cache,
             attn_implementation="sdpa" if train_config.use_fast_kernels else None,
         )
+    
+    model = autonvtx(model)
 
     # Load the tokenizer and add special tokens
     tokenizer = AutoTokenizer.from_pretrained(train_config.model_name if train_config.tokenizer_name is None else train_config.tokenizer_name)

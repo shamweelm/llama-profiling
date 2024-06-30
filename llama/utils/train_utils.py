@@ -51,6 +51,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
     Returns: results dictionary containing average training and validation perplexity and loss
     """
     # model = autonvtx(model)
+    torch.cuda.profiler.start()
     
     # Create a gradient scaler for fp16
     if train_config.use_fp16 and train_config.enable_fsdp:
@@ -282,6 +283,8 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
     #saving the training params including fsdp setting for reference.
     if train_config.enable_fsdp and not train_config.use_peft and rank==0:
         save_train_params(train_config, fsdp_config, rank)
+        
+    torch.cuda.profiler.stop()
 
     return results
 

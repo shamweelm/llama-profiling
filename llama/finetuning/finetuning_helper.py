@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+from datetime import datetime
 import os
 
 import dataclasses
@@ -49,6 +50,27 @@ from llama.utils.train_utils import (
 )
 from accelerate.utils import is_xpu_available
 import autonvtx
+from functools import wraps
+# import nvidia_dlprof_pytorch_nvtx as nvtx
+# nvtx.init(enable_function_stack=True)
+
+# # NVTX tracing decorator
+# def nvtx_trace(func):
+#     @wraps(func)
+#     def wrapper(*args, **kwargs):
+#         nvtx.range_push(func.__name__)
+#         result = func(*args, **kwargs)
+#         nvtx.range_pop()
+#         return result
+#     return wrapper
+
+
+# # Function to apply NVTX tracing to all methods of a class
+# def apply_nvtx_trace_to_class(cls):
+#     for attr_name, attr_value in cls.__dict__.items():
+#         if callable(attr_value):
+#             setattr(cls, attr_name, nvtx_trace(attr_value))
+#     return cls
 
 def setup_wandb(train_config, fsdp_config, **kwargs):
     try:
@@ -70,7 +92,8 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
 
 def main(**kwargs):
     # Update the configuration for the training and sharding process
-    torch.cuda.profiler.start()
+    print("Starting the training process at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Setup")
     train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
     update_config((train_config, fsdp_config), **kwargs)
     
@@ -102,7 +125,11 @@ def main(**kwargs):
     if train_config.use_wandb:
         if not train_config.enable_fsdp or rank==0:
             wandb_run = setup_wandb(train_config, fsdp_config, **kwargs)
+    torch.cuda.nvtx.range_pop()
+    print("Configuration setup complete at : ", datetime.now())
 
+    print("Starting the model setup at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Model Setup")
     # Load the pre-trained model and setup its configuration
     use_cache = False if train_config.enable_fsdp else None
     if train_config.enable_fsdp and train_config.low_cpu_fsdp:
@@ -134,9 +161,13 @@ def main(**kwargs):
             use_cache=use_cache,
             attn_implementation="sdpa" if train_config.use_fast_kernels else None,
         )
+    torch.cuda.nvtx.range_pop()
+    print("Model setup complete at : ", datetime.now())
     
     model = autonvtx(model)
 
+    print("Starting the tokenizer setup at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Tokenizer Setup")
     # Load the tokenizer and add special tokens
     tokenizer = AutoTokenizer.from_pretrained(train_config.model_name if train_config.tokenizer_name is None else train_config.tokenizer_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -149,6 +180,11 @@ def main(**kwargs):
 
     print_model_size(model, train_config, rank if train_config.enable_fsdp else 0)
 
+    torch.cuda.nvtx.range_pop()
+    print("Tokenizer setup complete at : ", datetime.now())
+    
+    print("Starting the model preparation at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Model Preparation")
     # Prepare the model for int8 training if quantization is enabled
     if train_config.quantization:
         model = prepare_model_for_kbit_training(model)
@@ -209,7 +245,11 @@ def main(**kwargs):
             model.to("xpu:0")
         elif torch.cuda.is_available():
             model.to("cuda")
+    torch.cuda.nvtx.range_pop()
+    print("Model preparation complete at : ", datetime.now())
 
+    print("Starting the data preparation at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Data Preparation")
     dataset_config = generate_dataset_config(train_config, kwargs)
 
      # Load and preprocess the dataset for training and validation
@@ -261,6 +301,11 @@ def main(**kwargs):
         else:
             print(f"--> Num of Validation Set Batches loaded = {len(eval_dataloader)}")
 
+    torch.cuda.nvtx.range_pop()
+    print("Data preparation complete at : ", datetime.now())
+    
+    print("Starting the optimizer and scheduler setup at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Optimizer and Scheduler Setup")
     # Initialize the optimizer and learning rate scheduler
     if fsdp_config.pure_bf16 and fsdp_config.optimizer == "anyprecision":
         optimizer = AnyPrecisionAdamW(
@@ -278,7 +323,11 @@ def main(**kwargs):
             weight_decay=train_config.weight_decay,
         )
     scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
+    torch.cuda.nvtx.range_pop()
+    print("Optimizer and Scheduler setup complete at : ", datetime.now())
 
+    print("Starting the training process at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Training")
     # Start the training process
     results = train(
         model,
@@ -294,13 +343,13 @@ def main(**kwargs):
         rank if train_config.enable_fsdp else None,
         wandb_run,
     )
+    torch.cuda.nvtx.range_pop()
+    print("Training process complete at : ", datetime.now())
     if not train_config.enable_fsdp or rank==0:
         [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
         if train_config.use_wandb:
             for k,v in results.items():
                 wandb_run.summary[k] = v
-                
-    torch.cuda.profiler.stop()
 
 if __name__ == "__main__":
     fire.Fire(main)

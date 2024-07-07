@@ -62,27 +62,29 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
 
 
 def setup_model_parallel_group():
-    if 'WORLD_SIZE' in os.environ and 'RANK' in os.environ:
-        world_size = int(os.environ['WORLD_SIZE'])
-        rank = int(os.environ['RANK'])
+    if "WORLD_SIZE" in os.environ and "RANK" in os.environ:
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["RANK"])
         if world_size > 1:
             initialize_model_parallel(world_size, rank)
         else:
-            print("Single process detected, skipping model parallel group initialization.")
+            print(
+                "Single process detected, skipping model parallel group initialization."
+            )
     else:
-        print("Distributed environment variables not set, skipping model parallel group initialization.")
-    
+        print(
+            "Distributed environment variables not set, skipping model parallel group initialization."
+        )
+
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group("nccl")
-    
+
     if not model_parallel_is_initialized():
         model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
         initialize_model_parallel(model_parallel_size)
 
 
-def load_model_and_tokenizer(
-    train_config
-):    
+def load_model_and_tokenizer(train_config):
     start_time = time.time()
     checkpoints = sorted(Path(train_config.ckpt_dir).glob("*.pth"))
     assert len(checkpoints) > 0, f"No checkpoint files found in {train_config.ckpt_dir}"
@@ -97,7 +99,7 @@ def load_model_and_tokenizer(
         max_batch_size=train_config.max_batch_size,
         **params,
     )
-    
+
     print("Starting the tokenizer setup at : ", datetime.now())
     torch.cuda.nvtx.range_push("Tokenizer Setup")
     tokenizer = Tokenizer(model_path=train_config.tokenizer_path)
@@ -106,16 +108,17 @@ def load_model_and_tokenizer(
 
     print("Tokenizer setup complete at : ", datetime.now())
     torch.cuda.nvtx.range_pop()
-    
+
     model_args.vocab_size = tokenizer.n_words
 
-    model = Transformer(model_args)
+    model = Transformer(model_args).cuda()
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
     model.load_state_dict(checkpoint, strict=False)
+    del checkpoint
     model = autonvtx(model)
 
     print(f"Loaded in {time.time() - start_time:.2f} seconds")
-        
+
     return model, tokenizer
 
 
@@ -139,7 +142,7 @@ def main(**kwargs):
             torch.cuda.set_device(local_rank)
         clear_gpu_cache(local_rank)
         setup_environ_flags(rank)
-    
+
     if not train_config.enable_fsdp:
         setup_model_parallel_group()
 
@@ -147,7 +150,7 @@ def main(**kwargs):
     wandb_run = None
 
     if train_config.use_wandb:
-        if not train_config.enable_fsdp or rank==0:
+        if not train_config.enable_fsdp or rank == 0:
             wandb_run = setup_wandb(train_config, fsdp_config, **kwargs)
 
     # Load the pre-trained model and setup its configuration
@@ -158,10 +161,8 @@ def main(**kwargs):
     print("Starting the model setup at : ", datetime.now())
     torch.cuda.nvtx.range_push("Model Setup")
 
-    model, tokenizer = load_model_and_tokenizer(
-        train_config
-    )
-    
+    model, tokenizer = load_model_and_tokenizer(train_config)
+
     if train_config.enable_fsdp and train_config.low_cpu_fsdp:
         if rank == 0:
             model = model.cuda()
@@ -192,7 +193,7 @@ def main(**kwargs):
         )
         print("HSDP device mesh is ready")
 
-    #setting up FSDP if enable_fsdp is enabled
+    # setting up FSDP if enable_fsdp is enabled
     if train_config.enable_fsdp:
         if not train_config.use_peft and train_config.freeze_layers:
             freeze_transformer_layers(model, train_config.num_freeze_layers)
@@ -206,23 +207,38 @@ def main(**kwargs):
 
         model = FSDP(
             model,
-            auto_wrap_policy= my_auto_wrapping_policy if train_config.use_peft else wrapping_policy,
-            cpu_offload=CPUOffload(offload_params=True) if fsdp_config.fsdp_cpu_offload else None,
-            mixed_precision=mixed_precision_policy if not fsdp_config.pure_bf16 else None,
+            auto_wrap_policy=(
+                my_auto_wrapping_policy if train_config.use_peft else wrapping_policy
+            ),
+            cpu_offload=(
+                CPUOffload(offload_params=True)
+                if fsdp_config.fsdp_cpu_offload
+                else None
+            ),
+            mixed_precision=(
+                mixed_precision_policy if not fsdp_config.pure_bf16 else None
+            ),
             sharding_strategy=fsdp_config.sharding_strategy,
             device_mesh=hsdp_device_mesh_plan,
             device_id=device_id,
             limit_all_gathers=True,
             sync_module_states=train_config.low_cpu_fsdp,
-            param_init_fn=(lambda module: module.to_empty(device=torch.device("cuda"), recurse=False))
-            if train_config.low_cpu_fsdp and rank != 0 else None,
+            param_init_fn=(
+                (
+                    lambda module: module.to_empty(
+                        device=torch.device("cuda"), recurse=False
+                    )
+                )
+                if train_config.low_cpu_fsdp and rank != 0
+                else None
+            ),
         )
         if fsdp_config.fsdp_activation_checkpointing:
             apply_fsdp_checkpointing(model)
     elif not train_config.quantization and not train_config.enable_fsdp:
         if torch.cuda.is_available():
             model.to("cuda")
-    
+
     torch.cuda.nvtx.range_pop()
     print("Model preparation complete at : ", datetime.now())
 
@@ -230,7 +246,7 @@ def main(**kwargs):
     torch.cuda.nvtx.range_push("Data Preparation")
     dataset_config = generate_dataset_config(train_config, kwargs)
 
-     # Load and preprocess the dataset for training and validation
+    # Load and preprocess the dataset for training and validation
     dataset_train = get_preprocessed_dataset(
         tokenizer,
         dataset_config,
@@ -249,9 +265,13 @@ def main(**kwargs):
         print(f"--> Validation Set Length = {len(dataset_val)}")
 
     if train_config.batching_strategy == "packing":
-        dataset_train = ConcatDataset(dataset_train, chunk_size=train_config.context_length)
+        dataset_train = ConcatDataset(
+            dataset_train, chunk_size=train_config.context_length
+        )
 
-    train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, tokenizer, "train")
+    train_dl_kwargs = get_dataloader_kwargs(
+        train_config, dataset_train, tokenizer, "train"
+    )
 
     # Create DataLoaders for the training and validation dataset
     train_dataloader = torch.utils.data.DataLoader(
@@ -264,9 +284,13 @@ def main(**kwargs):
     eval_dataloader = None
     if train_config.run_validation:
         if train_config.batching_strategy == "packing":
-            dataset_val = ConcatDataset(dataset_val, chunk_size=train_config.context_length)
+            dataset_val = ConcatDataset(
+                dataset_val, chunk_size=train_config.context_length
+            )
 
-        val_dl_kwargs = get_dataloader_kwargs(train_config, dataset_val, tokenizer, "val")
+        val_dl_kwargs = get_dataloader_kwargs(
+            train_config, dataset_val, tokenizer, "val"
+        )
 
         eval_dataloader = torch.utils.data.DataLoader(
             dataset_val,
@@ -275,7 +299,9 @@ def main(**kwargs):
             **val_dl_kwargs,
         )
         if len(eval_dataloader) == 0:
-            raise ValueError("The eval set size is too small for dataloader to load even one batch. Please increase the size of eval set.")
+            raise ValueError(
+                "The eval set size is too small for dataloader to load even one batch. Please increase the size of eval set."
+            )
         else:
             print(f"--> Num of Validation Set Batches loaded = {len(eval_dataloader)}")
 

@@ -52,7 +52,7 @@ class InstructionDataset(Dataset):
             self.tokenizer.encode(prompt), dtype=torch.int64
         )
         example = self.tokenizer.encode(example)
-        example.append(self.tokenizer.eos_token_id)
+        example.append(self.tokenizer.eos_id)
         example = torch.tensor(
             example, dtype=torch.int64
         )

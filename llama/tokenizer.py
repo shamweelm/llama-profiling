@@ -66,3 +66,29 @@ class Tokenizer:
             str: The decoded string.
         """
         return self.sp_model.decode(t)
+    
+    def batch_encode(self, texts: List[str], bos: bool, eos: bool) -> List[List[int]]:
+        """
+        Encodes a list of strings into a list of lists of token IDs.
+
+        Args:
+            texts (List[str]): The list of input strings to be encoded.
+            bos (bool): Whether to prepend the beginning-of-sequence token to each string.
+            eos (bool): Whether to append the end-of-sequence token to each string.
+
+        Returns:
+            List[List[int]]: A list of lists of token IDs.
+        """
+        return [self.encode(text, bos, eos) for text in texts]
+
+    def batch_decode(self, sequences: List[List[int]]) -> List[str]:
+        """
+        Decodes a list of lists of token IDs into a list of strings.
+
+        Args:
+            sequences (List[List[int]]): The list of lists of token IDs to be decoded.
+
+        Returns:
+            List[str]: A list of decoded strings.
+        """
+        return [self.decode(seq) for seq in sequences]

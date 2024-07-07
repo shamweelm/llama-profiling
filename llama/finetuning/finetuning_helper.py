@@ -71,6 +71,10 @@ def setup_model_parallel_group():
             print("Single process detected, skipping model parallel group initialization.")
     else:
         print("Distributed environment variables not set, skipping model parallel group initialization.")
+    
+    if not model_parallel_is_initialized():
+        model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
+        initialize_model_parallel(model_parallel_size)
 
 
 def load_model_and_tokenizer(

@@ -49,9 +49,9 @@ class InstructionDataset(Dataset):
             prompt = PROMPT_DICT["prompt_input"].format_map(ann)
         example = prompt + ann["output"]
         prompt = torch.tensor(
-            self.tokenizer.encode(prompt), dtype=torch.int64
+            self.tokenizer.encode(prompt, bos=False, eos=False), dtype=torch.int64
         )
-        example = self.tokenizer.encode(example, eos=True)
+        example = self.tokenizer.encode(example, bos=False, eos=True)
         example = torch.tensor(
             example, dtype=torch.int64
         )

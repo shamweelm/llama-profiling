@@ -23,8 +23,8 @@ def get_preprocessed_samsum(dataset_config, tokenizer, split):
     dataset = dataset.map(apply_prompt_template, remove_columns=list(dataset.features))
 
     def tokenize_add_label(sample):
-        prompt = tokenizer.encode(sample["prompt"], bos=True)
-        summary = tokenizer.encode(sample["summary"], eos=True)
+        prompt = tokenizer.encode(sample["prompt"], bos=True, eos=False)
+        summary = tokenizer.encode(sample["summary"], bos=False, eos=True)
 
         sample = {
             "input_ids": prompt + summary,

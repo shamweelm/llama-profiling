@@ -156,7 +156,7 @@ def write_model(
     if num_shards == 1:
         # Not sharded
         # (The sharded implementation would also work, but this is simpler.)
-        loaded = torch.load(os.path.join(input_base_path, "consolidated.00.pth"), map_location="cpu")
+        loaded = torch.load(os.path.join(input_base_path, "consolidated.00.pth"), map_location="cuda")
     else:
         # Sharded
         loaded = [

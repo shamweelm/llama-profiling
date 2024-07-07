@@ -112,8 +112,10 @@ def load_model_and_tokenizer(train_config):
     model_args.vocab_size = tokenizer.n_words
 
     model = Transformer(model_args).cuda()
+    print("Initialized Model")
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
     model.load_state_dict(checkpoint, strict=False)
+    print("Loaded Model state dict")
     del checkpoint
     model = autonvtx(model)
 

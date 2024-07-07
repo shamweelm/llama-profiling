@@ -110,6 +110,7 @@ def load_model_and_tokenizer(
     model_args.vocab_size = tokenizer.n_words
 
     model = Transformer(model_args)
+    torch.set_default_tensor_type(torch.cuda.HalfTensor)
     model.load_state_dict(checkpoint, strict=False)
     model = autonvtx(model)
 
@@ -142,6 +143,7 @@ def main(**kwargs):
     if not train_config.enable_fsdp:
         setup_model_parallel_group()
 
+    clear_gpu_cache(0)
     wandb_run = None
 
     if train_config.use_wandb:

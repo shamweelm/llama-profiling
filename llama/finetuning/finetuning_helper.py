@@ -72,6 +72,9 @@ def setup_model_parallel_group():
     else:
         print("Distributed environment variables not set, skipping model parallel group initialization.")
     
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group("nccl")
+    
     if not model_parallel_is_initialized():
         model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
         initialize_model_parallel(model_parallel_size)

@@ -61,30 +61,44 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
     return run
 
 
+def setup_model_parallel_group():
+    if 'WORLD_SIZE' in os.environ and 'RANK' in os.environ:
+        world_size = int(os.environ['WORLD_SIZE'])
+        rank = int(os.environ['RANK'])
+        if world_size > 1:
+            initialize_model_parallel(world_size, rank)
+        else:
+            print("Single process detected, skipping model parallel group initialization.")
+    else:
+        print("Distributed environment variables not set, skipping model parallel group initialization.")
+
+
 def load_model_and_tokenizer(
     train_config
-):
-    ckpt_dir = train_config.ckpt_dir
-    max_seq_len = train_config.max_seq_len
-    max_batch_size = train_config.max_batch_size
-    tokenizer_path = train_config.tokenizer_path
+):    
     start_time = time.time()
-    checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-    assert len(checkpoints) > 0, f"No checkpoint files found in {ckpt_dir}"
+    checkpoints = sorted(Path(train_config.ckpt_dir).glob("*.pth"))
+    assert len(checkpoints) > 0, f"No checkpoint files found in {train_config.ckpt_dir}"
 
     ckpt_path = checkpoints[get_model_parallel_rank()]
     checkpoint = torch.load(ckpt_path, map_location="cuda")
-    with open(Path(ckpt_dir) / "params.json", "r") as f:
+    with open(Path(train_config.ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
     model_args = ModelArgs(
-        max_seq_len=max_seq_len,
-        max_batch_size=max_batch_size,
+        max_seq_len=train_config.max_seq_len,
+        max_batch_size=train_config.max_batch_size,
         **params,
     )
-    tokenizer = Tokenizer(model_path=tokenizer_path)
+    
+    print("Starting the tokenizer setup at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Tokenizer Setup")
+    tokenizer = Tokenizer(model_path=train_config.tokenizer_path)
     # Set the pad_id to eos_id for packing batching strategy
     tokenizer.pad_id = tokenizer.eos_id
+
+    print("Tokenizer setup complete at : ", datetime.now())
+    torch.cuda.nvtx.range_pop()
     
     model_args.vocab_size = tokenizer.n_words
 
@@ -98,11 +112,6 @@ def load_model_and_tokenizer(
 
 
 def main(**kwargs):
-    # ckpt_dir = kwargs.get("ckpt_dir", None)
-    # max_seq_len = kwargs.get("max_seq_len", 1024)
-    # tokenizer_path = kwargs.get("tokenizer_path", None)
-    # max_batch_size = kwargs.get("max_batch_size", 4)
-
     print("Starting the training process at : ", datetime.now())
     torch.cuda.nvtx.range_push("Setup")
     train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
@@ -113,15 +122,18 @@ def main(**kwargs):
     if train_config.enable_fsdp:
         setup()
         # torchrun specific
-        local_rank = int(os.environ["LOCAL_RANK"])
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
 
     if torch.distributed.is_initialized():
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
         clear_gpu_cache(local_rank)
         setup_environ_flags(rank)
+    
+    if not train_config.enable_fsdp:
+        setup_model_parallel_group()
 
     wandb_run = None
 
@@ -152,12 +164,7 @@ def main(**kwargs):
     torch.cuda.nvtx.range_pop()
     print("Model setup complete at : ", datetime.now())
 
-    print("Starting the tokenizer setup at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Tokenizer Setup")
-
     print_model_size(model, train_config, rank if train_config.enable_fsdp else 0)
-    torch.cuda.nvtx.range_pop()
-    print("Tokenizer setup complete at : ", datetime.now())
 
     print("Starting the model preparation at : ", datetime.now())
     torch.cuda.nvtx.range_push("Model Preparation")

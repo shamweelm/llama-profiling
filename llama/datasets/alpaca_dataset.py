@@ -51,8 +51,7 @@ class InstructionDataset(Dataset):
         prompt = torch.tensor(
             self.tokenizer.encode(prompt), dtype=torch.int64
         )
-        example = self.tokenizer.encode(example)
-        example.append(self.tokenizer.eos_id)
+        example = self.tokenizer.encode(example, eos=True)
         example = torch.tensor(
             example, dtype=torch.int64
         )

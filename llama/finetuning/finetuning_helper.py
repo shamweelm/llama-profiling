@@ -95,8 +95,8 @@ def load_model_and_tokenizer(train_config):
         params = json.loads(f.read())
 
     model_args = ModelArgs(
-        max_seq_len=train_config.max_seq_len,
-        max_batch_size=train_config.max_batch_size,
+        max_seq_len=train_config.context_length,
+        max_batch_size=train_config.batch_size_training,
         **params,
     )
 

@@ -139,7 +139,7 @@ def train(
                         batch[key] = batch[key].to("cuda:0")
 
                 with autocast():
-                    loss = model(**batch).loss
+                    logits, loss = model(**batch)
                 loss = loss / gradient_accumulation_steps
                 if train_config.save_metrics:
                     train_step_loss.append(loss.detach().float().item())
@@ -421,15 +421,14 @@ def evaluation(model, train_config, eval_dataloader, local_rank, tokenizer, wand
         # Ensure no gradients are computed for this scope to save memory
         with torch.no_grad():
             # Forward pass and compute loss
-            outputs = model(**batch)
-            loss = outputs.loss
+            logits, loss = model(**batch)
             if train_config.save_metrics:
                 val_step_loss.append(loss.detach().float().item())
                 val_step_perplexity.append(float(torch.exp(loss.detach().float())))
 
             eval_loss += loss.detach().float()
         # Decode predictions and add to evaluation predictions list
-        preds = torch.argmax(outputs.logits, -1)
+        preds = torch.argmax(logits, -1)
         eval_preds.extend(
             tokenizer.batch_decode(
                 preds.detach().cpu().numpy()

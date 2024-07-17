@@ -54,7 +54,6 @@ class Llama:
         tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
-        model_parallel_size: Optional[int] = None,
         seed: int = 1,
     ) -> "Llama":
         """
@@ -65,8 +64,6 @@ class Llama:
             tokenizer_path (str): Path to the tokenizer file.
             max_seq_len (int): Maximum sequence length for input text.
             max_batch_size (int): Maximum batch size for inference.
-            model_parallel_size (Optional[int], optional): Number of model parallel processes.
-                If not provided, it's determined from the environment. Defaults to None.
 
         Returns:
             Llama: An instance of the Llama class with the loaded model and tokenizer.
@@ -95,9 +92,6 @@ class Llama:
         start_time = time.time()
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        assert model_parallel_size == len(
-            checkpoints
-        ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
         ckpt_path = checkpoints[0]
         checkpoint = torch.load(ckpt_path, map_location="cuda")
         with open(Path(ckpt_dir) / "params.json", "r") as f:

@@ -35,11 +35,6 @@ from llama.utils.train_utils import (
     get_policies,
 )
 from llama.model import ModelArgs, Transformer, TransformerBlock
-from fairscale.nn.model_parallel.initialize import (
-    get_model_parallel_rank,
-    initialize_model_parallel,
-    model_parallel_is_initialized,
-)
 
 
 def setup_wandb(train_config, fsdp_config, **kwargs):
@@ -61,36 +56,13 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
     return run
 
 
-def setup_model_parallel_group():
-    if "WORLD_SIZE" in os.environ and "RANK" in os.environ:
-        world_size = int(os.environ["WORLD_SIZE"])
-        rank = int(os.environ["RANK"])
-        if world_size > 1:
-            initialize_model_parallel(world_size, rank)
-        else:
-            print(
-                "Single process detected, skipping model parallel group initialization."
-            )
-    else:
-        print(
-            "Distributed environment variables not set, skipping model parallel group initialization."
-        )
-
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group("nccl")
-
-    if not model_parallel_is_initialized():
-        model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
-        initialize_model_parallel(model_parallel_size)
-
-
 def load_model_and_tokenizer(train_config):
     start_time = time.time()
     checkpoints = sorted(Path(train_config.ckpt_dir).glob("*.pth"))
     assert len(checkpoints) > 0, f"No checkpoint files found in {train_config.ckpt_dir}"
 
-    ckpt_path = checkpoints[get_model_parallel_rank()]
-    checkpoint = torch.load(ckpt_path, map_location="cuda")
+    ckpt_path = checkpoints[0]
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
     with open(Path(train_config.ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
@@ -144,9 +116,6 @@ def main(**kwargs):
             torch.cuda.set_device(local_rank)
         clear_gpu_cache(local_rank)
         setup_environ_flags(rank)
-
-    if not train_config.enable_fsdp:
-        setup_model_parallel_group()
 
     clear_gpu_cache(0)
     wandb_run = None

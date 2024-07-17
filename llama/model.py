@@ -5,14 +5,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import fairscale.nn.model_parallel.initialize as fs_init
 import torch
 import torch.nn.functional as F
-from fairscale.nn.model_parallel.layers import (
-    ColumnParallelLinear,
-    ParallelEmbedding,
-    RowParallelLinear,
-)
 from torch import nn
 
 
@@ -189,50 +183,25 @@ class Attention(nn.Module):
             n_local_kv_heads (int): Number of local key and value heads.
             n_rep (int): Number of repetitions for local heads.
             head_dim (int): Dimension size of each attention head.
-            wq (ColumnParallelLinear): Linear transformation for queries.
-            wk (ColumnParallelLinear): Linear transformation for keys.
-            wv (ColumnParallelLinear): Linear transformation for values.
-            wo (RowParallelLinear): Linear transformation for output.
+            wq (nn.Linear): Linear transformation for queries.
+            wk (nn.Linear): Linear transformation for keys.
+            wv (nn.Linear): Linear transformation for values.
+            wo (nn.Linear): Linear transformation for output.
             cache_k (torch.Tensor): Cached keys for attention.
             cache_v (torch.Tensor): Cached values for attention.
 
         """
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        model_parallel_size = fs_init.get_model_parallel_world_size()
-        self.n_local_heads = args.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        self.n_local_heads = args.n_heads
+        self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = ColumnParallelLinear(
-            args.dim,
-            args.n_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wk = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wv = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wo = RowParallelLinear(
-            args.n_heads * self.head_dim,
-            args.dim,
-            bias=False,
-            input_is_parallel=True,
-            init_method=lambda x: x,
-        )
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
         self.cache_k = torch.zeros(
             (
@@ -329,9 +298,9 @@ class FeedForward(nn.Module):
             ffn_dim_multiplier (float, optional): Custom multiplier for hidden dimension. Defaults to None.
 
         Attributes:
-            w1 (ColumnParallelLinear): Linear transformation for the first layer.
-            w2 (RowParallelLinear): Linear transformation for the second layer.
-            w3 (ColumnParallelLinear): Linear transformation for the third layer.
+            w1 (nn.Linear): Linear transformation for the first layer.
+            w2 (nn.Linear): Linear transformation for the second layer.
+            w3 (nn.Linear): Linear transformation for the third layer.
 
         """
         super().__init__()
@@ -341,15 +310,9 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
-        self.w2 = RowParallelLinear(
-            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-        )
-        self.w3 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -427,10 +390,10 @@ class Transformer(nn.Module):
             params (ModelArgs): Model configuration parameters.
             vocab_size (int): Vocabulary size.
             n_layers (int): Number of layers in the model.
-            tok_embeddings (ParallelEmbedding): Token embeddings.
+            tok_embeddings (nn.Embedding): Token embeddings.
             layers (torch.nn.ModuleList): List of Transformer blocks.
             norm (RMSNorm): Layer normalization for the model output.
-            output (ColumnParallelLinear): Linear layer for final output.
+            output (nn.Linear): Linear layer for final output.
             freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
 
         """
@@ -439,18 +402,14 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.tok_embeddings = ParallelEmbedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
-        )
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = ColumnParallelLinear(
-            params.dim, params.vocab_size, bias=False, init_method=lambda x: x
-        )
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
         self.freqs_cis = precompute_freqs_cis(
             # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096.
@@ -482,17 +441,21 @@ class Transformer(nn.Module):
         h = self.tok_embeddings(input_ids)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
-        
+
         if attention_mask is not None:
             # Expand attention mask for multi-head attention computation
             # Attn mask shape: (bsz, seqlen)
             # Expanded mask shape: (bsz, n_heads, 1, seqlen)
-            mask = attention_mask[:, None, None, :].expand(-1, self.params.n_heads, -1, -1)
+            mask = attention_mask[:, None, None, :].expand(
+                -1, self.params.n_heads, -1, -1
+            )
         else:
             mask = None
-            
+
         if seqlen > 1:
-            causal_mask = torch.full((seqlen, seqlen), float("-inf"), device=input_ids.device)
+            causal_mask = torch.full(
+                (seqlen, seqlen), float("-inf"), device=input_ids.device
+            )
             causal_mask = torch.triu(causal_mask, diagonal=1)
             causal_mask = torch.hstack(
                 [torch.zeros((seqlen, start_pos), device=input_ids.device), causal_mask]
@@ -506,17 +469,19 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         logits = self.output(h).float()
-        
+
         if labels is not None:
             # Shift logits to the left for computing loss i.e removing the first token
             # Shift labels to the right for training i.e removing the last token
-            
+
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            
+
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, self.vocab_size), shift_labels.view(-1))
-            
+            loss = loss_fct(
+                shift_logits.view(-1, self.vocab_size), shift_labels.view(-1)
+            )
+
             return logits, loss
-            
+
         return logits, None

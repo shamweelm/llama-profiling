@@ -3,7 +3,8 @@
 
 import functools
 
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+# from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from llama.model import TransformerBlock
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
     size_based_auto_wrap_policy,
@@ -26,7 +27,7 @@ def get_llama_wrapper():
     llama_auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={
-            LlamaDecoderLayer,
+            TransformerBlock,
         },
     )
 

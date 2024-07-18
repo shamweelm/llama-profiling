@@ -7,6 +7,7 @@ import time
 import fire
 import random
 from llama.tokenizer import Tokenizer
+from llama.utils.memory_utils import get_memory_stats
 import torch
 import torch.optim as optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy
@@ -56,13 +57,27 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
     return run
 
 
-def load_model_and_tokenizer(train_config):
-    start_time = time.time()
+def load_checkpoint(train_config):
     checkpoints = sorted(Path(train_config.ckpt_dir).glob("*.pth"))
     assert len(checkpoints) > 0, f"No checkpoint files found in {train_config.ckpt_dir}"
-
     ckpt_path = checkpoints[0]
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    checkpoint_dict = torch.load(ckpt_path, map_location="cpu")
+    
+    return checkpoint_dict
+
+def load_tokenizer(train_config):
+    torch.cuda.nvtx.range_push("Tokenizer Setup")
+    tokenizer = Tokenizer(model_path=train_config.tokenizer_path)
+    # Set the pad_id to eos_id for packing batching strategy
+    tokenizer.pad_id = tokenizer.eos_id
+
+    print("Tokenizer setup complete at : ", datetime.now())
+    torch.cuda.nvtx.range_pop()
+    
+    return tokenizer
+
+def setup_model(train_config, fsdp_config, rank=0):
+    start_time = time.time()
     with open(Path(train_config.ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
@@ -71,88 +86,29 @@ def load_model_and_tokenizer(train_config):
         max_batch_size=train_config.batch_size_training,
         **params,
     )
-
-    print("Starting the tokenizer setup at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Tokenizer Setup")
-    tokenizer = Tokenizer(model_path=train_config.tokenizer_path)
-    # Set the pad_id to eos_id for packing batching strategy
-    tokenizer.pad_id = tokenizer.eos_id
-
-    print("Tokenizer setup complete at : ", datetime.now())
-    torch.cuda.nvtx.range_pop()
-
-    model_args.vocab_size = tokenizer.n_words
-
-    model = Transformer(model_args).cuda()
-    print("Initialized Model")
-    torch.set_default_tensor_type(torch.cuda.HalfTensor)
-    model.load_state_dict(checkpoint, strict=False)
-    print("Loaded Model state dict")
-    del checkpoint
-    model = autonvtx(model)
+    
+    if rank == 0:
+        model = Transformer(model_args)
+        print("Initialized Model")
+        model = autonvtx(model)
+        checkpoint = load_checkpoint(train_config)
+        # Load the pre-trained model and setup its configuration
+        model.load_state_dict(checkpoint, strict=False)
+    else:
+        model = Transformer(model_args)
+        print("Initialized Model")
+        model = autonvtx(model)
+        model = model.to(torch.device("meta"))
 
     print(f"Loaded in {time.time() - start_time:.2f} seconds")
-
-    return model, tokenizer
-
-
-def main(**kwargs):
-    print("Starting the training process at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Setup")
-    train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
-    update_config((train_config, fsdp_config), **kwargs)
-    torch.manual_seed(train_config.seed)
-    random.seed(train_config.seed)
-
-    if train_config.enable_fsdp:
-        setup()
-        # torchrun specific
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        rank = int(os.environ.get("RANK", 0))
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-
-    if torch.distributed.is_initialized():
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-        clear_gpu_cache(local_rank)
-        setup_environ_flags(rank)
-
-    clear_gpu_cache(0)
-    wandb_run = None
-
-    if train_config.use_wandb:
-        if not train_config.enable_fsdp or rank == 0:
-            wandb_run = setup_wandb(train_config, fsdp_config, **kwargs)
-
-    # Load the pre-trained model and setup its configuration
-    use_cache = False if train_config.enable_fsdp else None
-    torch.cuda.nvtx.range_pop()
-    print("Configuration setup complete at : ", datetime.now())
-
-    print("Starting the model setup at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Model Setup")
-
-    model, tokenizer = load_model_and_tokenizer(train_config)
-
-    if train_config.enable_fsdp and train_config.low_cpu_fsdp:
-        if rank == 0:
-            model = model.cuda()
-        else:
-            model = model.to(torch.device("meta"))
-    else:
-        model = model.cuda()
-
-    torch.cuda.nvtx.range_pop()
-    print("Model setup complete at : ", datetime.now())
-
-    print_model_size(model, train_config, rank if train_config.enable_fsdp else 0)
-
-    print("Starting the model preparation at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Model Preparation")
-
+    
     if train_config.enable_fsdp and fsdp_config.pure_bf16:
         model.to(torch.bfloat16)
 
+    return model
+
+
+def setup_fsdp_model(train_config, fsdp_config, model, rank=0):
     hsdp_device_mesh_plan = None
     if (
         fsdp_config.hsdp
@@ -163,58 +119,86 @@ def main(**kwargs):
             sharding_group_size=fsdp_config.sharding_group_size,
         )
         print("HSDP device mesh is ready")
+        
+    if not train_config.use_peft and train_config.freeze_layers:
+        freeze_transformer_layers(model, train_config.num_freeze_layers)
 
-    # setting up FSDP if enable_fsdp is enabled
-    if train_config.enable_fsdp:
-        if not train_config.use_peft and train_config.freeze_layers:
-            freeze_transformer_layers(model, train_config.num_freeze_layers)
+    mixed_precision_policy, wrapping_policy = get_policies(fsdp_config, rank)
+    my_auto_wrapping_policy = fsdp_auto_wrap_policy(model, TransformerBlock)
 
-        mixed_precision_policy, wrapping_policy = get_policies(fsdp_config, rank)
-        my_auto_wrapping_policy = fsdp_auto_wrap_policy(model, TransformerBlock)
+    device_id = 0
+    if torch.cuda.is_available():
+        device_id = torch.cuda.current_device()
+    
+    print("Setting up FSDP in device id: ", device_id)
 
-        device_id = 0
-        if torch.cuda.is_available():
-            device_id = torch.cuda.current_device()
-
-        model = FSDP(
-            model,
-            auto_wrap_policy=(
-                my_auto_wrapping_policy if train_config.use_peft else wrapping_policy
-            ),
-            cpu_offload=(
-                CPUOffload(offload_params=True)
-                if fsdp_config.fsdp_cpu_offload
-                else None
-            ),
-            mixed_precision=(
-                mixed_precision_policy if not fsdp_config.pure_bf16 else None
-            ),
-            sharding_strategy=fsdp_config.sharding_strategy,
-            device_mesh=hsdp_device_mesh_plan,
-            device_id=device_id,
-            limit_all_gathers=True,
-            sync_module_states=train_config.low_cpu_fsdp,
-            param_init_fn=(
-                (
-                    lambda module: module.to_empty(
-                        device=torch.device("cuda"), recurse=False
-                    )
+    model = FSDP(
+        model,
+        auto_wrap_policy=(
+            my_auto_wrapping_policy if train_config.use_peft else wrapping_policy
+        ),
+        cpu_offload=(
+            CPUOffload(offload_params=True)
+            if fsdp_config.fsdp_cpu_offload
+            else None
+        ),
+        mixed_precision=(
+            mixed_precision_policy if not fsdp_config.pure_bf16 else None
+        ),
+        sharding_strategy=fsdp_config.sharding_strategy,
+        device_mesh=hsdp_device_mesh_plan,
+        device_id=device_id,
+        limit_all_gathers=True,
+        sync_module_states=train_config.low_cpu_fsdp,
+        param_init_fn=(
+            (
+                lambda module: module.to_empty(
+                    device=torch.device("cuda"), recurse=False
                 )
-                if train_config.low_cpu_fsdp and rank != 0
-                else None
-            ),
+            )
+            if train_config.low_cpu_fsdp and rank != 0
+            else None
+        ),
+    )
+    if fsdp_config.fsdp_activation_checkpointing:
+        apply_fsdp_checkpointing(model)
+        
+    if rank == 0:
+        stats = get_memory_stats(device=device_id)
+        (
+        "Memory stats after model init:"
+        f"\n\tGPU peak memory allocation: {stats['peak_memory_alloc']:.2f} GB"
+        f"\n\tGPU peak memory reserved: {stats['peak_memory_reserved']:.2f} GB"
+        f"\n\tGPU peak memory active: {stats['peak_memory_active']:.2f} GB"
+    )
+        
+    # synchronize before training begins
+    torch.distributed.barrier()
+    
+    return model
+
+
+def setup_optimizer(model, train_config, fsdp_config):
+    if fsdp_config.pure_bf16 and fsdp_config.optimizer == "anyprecision":
+        optimizer = AnyPrecisionAdamW(
+            model.parameters(),
+            lr=train_config.lr,
+            momentum_dtype=torch.bfloat16,
+            variance_dtype=torch.bfloat16,
+            use_kahan_summation=False,
+            weight_decay=train_config.weight_decay,
         )
-        if fsdp_config.fsdp_activation_checkpointing:
-            apply_fsdp_checkpointing(model)
-    elif not train_config.quantization and not train_config.enable_fsdp:
-        if torch.cuda.is_available():
-            model.to("cuda")
+    else:
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=train_config.lr,
+            weight_decay=train_config.weight_decay,
+        )
+        
+    return optimizer
 
-    torch.cuda.nvtx.range_pop()
-    print("Model preparation complete at : ", datetime.now())
 
-    print("Starting the data preparation at : ", datetime.now())
-    torch.cuda.nvtx.range_push("Data Preparation")
+def setup_data(train_config, tokenizer, kwargs, rank=0):
     dataset_config = generate_dataset_config(train_config, kwargs)
 
     # Load and preprocess the dataset for training and validation
@@ -275,6 +259,69 @@ def main(**kwargs):
             )
         else:
             print(f"--> Num of Validation Set Batches loaded = {len(eval_dataloader)}")
+    
+    return train_dataloader, eval_dataloader
+
+
+def main(**kwargs):
+    print("Starting the training process at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Setup")
+    train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
+    update_config((train_config, fsdp_config), **kwargs)
+    torch.manual_seed(train_config.seed)
+    random.seed(train_config.seed)
+
+    if train_config.enable_fsdp:
+        setup()
+        # torchrun specific
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if torch.distributed.is_initialized():
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        clear_gpu_cache(local_rank)
+        setup_environ_flags(rank)
+    else:
+        clear_gpu_cache(0)
+    
+    wandb_run = None
+    if train_config.use_wandb:
+        if not train_config.enable_fsdp or rank == 0:
+            wandb_run = setup_wandb(train_config, fsdp_config, **kwargs)
+
+    # Load the pre-trained model and setup its configuration
+    torch.cuda.nvtx.range_pop()
+    print("Configuration setup complete at : ", datetime.now())
+
+    print("Starting the model setup at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Model Setup")
+
+    model = setup_model(train_config, fsdp_config, rank if train_config.enable_fsdp else 0)
+    tokenizer = load_tokenizer(train_config)
+
+    torch.cuda.nvtx.range_pop()
+    print("Model setup complete at : ", datetime.now())
+
+    print_model_size(model, train_config, rank if train_config.enable_fsdp else 0)
+
+    print("Starting the model preparation at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Model Preparation")
+
+    # setting up FSDP if enable_fsdp is enabled
+    if train_config.enable_fsdp:
+        model = setup_fsdp_model(train_config, fsdp_config, model, rank)
+    elif not train_config.quantization and not train_config.enable_fsdp:
+        if torch.cuda.is_available():
+            model.to("cuda")
+
+    torch.cuda.nvtx.range_pop()
+    print("Model preparation complete at : ", datetime.now())
+
+    print("Starting the data preparation at : ", datetime.now())
+    torch.cuda.nvtx.range_push("Data Preparation")
+    train_dataloader, eval_dataloader = setup_data(train_config, tokenizer, kwargs, rank)
 
     torch.cuda.nvtx.range_pop()
     print("Data preparation complete at : ", datetime.now())
@@ -282,21 +329,7 @@ def main(**kwargs):
     print("Starting the optimizer and scheduler setup at : ", datetime.now())
     torch.cuda.nvtx.range_push("Optimizer and Scheduler Setup")
     # Initialize the optimizer and learning rate scheduler
-    if fsdp_config.pure_bf16 and fsdp_config.optimizer == "anyprecision":
-        optimizer = AnyPrecisionAdamW(
-            model.parameters(),
-            lr=train_config.lr,
-            momentum_dtype=torch.bfloat16,
-            variance_dtype=torch.bfloat16,
-            use_kahan_summation=False,
-            weight_decay=train_config.weight_decay,
-        )
-    else:
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=train_config.lr,
-            weight_decay=train_config.weight_decay,
-        )
+    optimizer = setup_optimizer(model, train_config, fsdp_config)
     scheduler = StepLR(optimizer, step_size=1, gamma=train_config.gamma)
     torch.cuda.nvtx.range_pop()
     print("Optimizer and Scheduler setup complete at : ", datetime.now())

@@ -93,3 +93,41 @@ class MemoryTrace:
             print(f"Peak active {device_str} memory was {self.peak_active_gb} GB")
             print(f"{device_str} Malloc retries : {self.malloc_retries}")
         print(f"CPU Total Peak Memory consumed during the train (max): {self.cpu_peaked + self.cpu_begin} GB")
+        
+
+def get_memory_stats(device: torch.device, reset_stats: bool = True) -> dict:
+    """
+    Computes a memory summary for the passed in device. If ``reset_stats`` is ``True``, this will
+    also reset CUDA's peak memory tracking. This is useful to get data around relative use of peak
+    memory (e.g. peak memory during model init, during forward, etc) and optimize memory for
+    individual sections of training.
+
+    Args:
+        device (torch.device): Device to get memory summary for. Only CUDA devices are supported.
+        reset_stats (bool): Whether to reset CUDA's peak memory tracking.
+
+    Returns:
+        Dict[str, float]: A dictionary containing the peak memory active, peak memory allocated,
+        and peak memory reserved. This dict is useful for logging memory stats.
+
+    Raises:
+        ValueError: If the passed-in device is not CUDA.
+    """
+    if device.type != "cuda":
+        raise ValueError(
+            f"Logging memory stats is only supported on CUDA devices, got {device}"
+        )
+
+    peak_memory_active = torch.cuda.memory_stats().get("active_bytes.all.peak", 0) / 1e9
+    peak_mem_alloc = torch.cuda.max_memory_allocated(device) / 1e9
+    peak_mem_reserved = torch.cuda.max_memory_reserved(device) / 1e9
+
+    if reset_stats:
+        torch.cuda.reset_peak_memory_stats(device)
+
+    memory_stats = {
+        "peak_memory_active": peak_memory_active,
+        "peak_memory_alloc": peak_mem_alloc,
+        "peak_memory_reserved": peak_mem_reserved,
+    }
+    return memory_stats

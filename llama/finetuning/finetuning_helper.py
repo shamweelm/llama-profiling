@@ -86,6 +86,7 @@ def setup_model(train_config, fsdp_config, rank=0):
         max_batch_size=train_config.batch_size_training,
         **params,
     )
+    print("Model Args: ", model_args)
     
     if rank == 0:
         model = Transformer(model_args)

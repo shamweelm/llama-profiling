@@ -169,8 +169,8 @@ def setup_fsdp_model(train_config, fsdp_config, model, rank=0):
     if rank == 0:
         # torch.device
         # Get current device
-        device = torch.cuda.current_device()
-        stats = get_memory_stats(device=device)
+        current_device = torch.cuda.current_device()
+        stats = get_memory_stats(device=current_device)
         (
         "Memory stats after model init:"
         f"\n\tGPU peak memory allocation: {stats['peak_memory_alloc']:.2f} GB"

@@ -85,9 +85,9 @@ def setup_model(train_config, fsdp_config, rank=0):
     model_args = ModelArgs(
         max_seq_len=train_config.context_length,
         max_batch_size=train_config.batch_size_training,
-        vocab_size=tokenizer.n_words,
         **params,
     )
+    model_args.vocab_size = tokenizer.n_words
     print("Model Args: ", model_args)
     
     if rank == 0:

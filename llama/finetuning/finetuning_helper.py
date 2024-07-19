@@ -81,9 +81,11 @@ def setup_model(train_config, fsdp_config, rank=0):
     with open(Path(train_config.ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
+    tokenizer = load_tokenizer(train_config)
     model_args = ModelArgs(
         max_seq_len=train_config.context_length,
         max_batch_size=train_config.batch_size_training,
+        vocab_size=tokenizer.n_words
         **params,
     )
     print("Model Args: ", model_args)
@@ -106,7 +108,7 @@ def setup_model(train_config, fsdp_config, rank=0):
     if train_config.enable_fsdp and fsdp_config.pure_bf16:
         model.to(torch.bfloat16)
 
-    return model
+    return model, tokenizer
 
 
 def setup_fsdp_model(train_config, fsdp_config, model, rank=0):
@@ -299,8 +301,7 @@ def main(**kwargs):
     print("Starting the model setup at : ", datetime.now())
     torch.cuda.nvtx.range_push("Model Setup")
 
-    model = setup_model(train_config, fsdp_config, rank if train_config.enable_fsdp else 0)
-    tokenizer = load_tokenizer(train_config)
+    model, tokenizer = setup_model(train_config, fsdp_config, rank if train_config.enable_fsdp else 0)
 
     torch.cuda.nvtx.range_pop()
     print("Model setup complete at : ", datetime.now())

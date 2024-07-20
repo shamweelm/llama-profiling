@@ -7,7 +7,6 @@ import time
 import fire
 import random
 from llama.tokenizer import Tokenizer
-from llama.utils.memory_utils import get_memory_stats
 import torch
 import torch.optim as optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy
@@ -25,7 +24,7 @@ from llama.utils.config_utils import (
     get_dataloader_kwargs,
 )
 from llama.utils.dataset_utils import get_preprocessed_dataset
-from llama.utils.fsdp_utils import hsdp_device_mesh
+from llama.utils.fsdp_utils import hsdp_device_mesh, set_default_dtype, validate_no_params_on_meta_device
 from llama.utils.train_utils import (
     train,
     freeze_transformer_layers,
@@ -58,11 +57,14 @@ def setup_wandb(train_config, fsdp_config, **kwargs):
 
 
 def load_checkpoint(train_config):
+    start_time = time.perf_counter()
     checkpoints = sorted(Path(train_config.ckpt_dir).glob("*.pth"))
     assert len(checkpoints) > 0, f"No checkpoint files found in {train_config.ckpt_dir}"
     ckpt_path = checkpoints[0]
-    checkpoint_dict = torch.load(ckpt_path, map_location="cpu")
+    checkpoint_dict = torch.load(ckpt_path, map_location="cpu", mmap=True)
     
+    end_time = time.perf_counter()
+    print(f"Loaded checkpoint from {ckpt_path} in {end_time - start_time:.4f} seconds")
     return checkpoint_dict
 
 def load_tokenizer(train_config):
@@ -77,7 +79,7 @@ def load_tokenizer(train_config):
     return tokenizer
 
 def setup_model(train_config, fsdp_config, rank=0):
-    start_time = time.time()
+    start_time = time.perf_counter()
     with open(Path(train_config.ckpt_dir) / "params.json", "r") as f:
         params = json.loads(f.read())
 
@@ -91,22 +93,31 @@ def setup_model(train_config, fsdp_config, rank=0):
     print("Model Args: ", model_args)
     
     if rank == 0:
-        model = Transformer(model_args)
-        print("Initialized Model")
-        model = autonvtx(model)
-        checkpoint = load_checkpoint(train_config)
-        # Load the pre-trained model and setup its configuration
-        model.load_state_dict(checkpoint, strict=False)
-    else:
-        model = Transformer(model_args)
-        print("Initialized Model")
-        model = autonvtx(model)
-        model = model.to(torch.device("meta"))
+        # model = Transformer(model_args)
+        # print("Initialized Model on rank 0 at : ", datetime.now())
+        # model = autonvtx(model)
+        # checkpoint = load_checkpoint(train_config)
+        # # Load the pre-trained model and setup its configuration
+        # model.load_state_dict(checkpoint, strict=False)
+        with set_default_dtype(torch.float32), torch.device("cuda"):
+            model = Transformer(model_args)
+            print("Initialized Model on rank 0 at : ", datetime.now())
+            model = autonvtx(model)
+    else:        
+        # For non-zero ranks, load the model on meta device
+        with set_default_dtype(torch.float32), torch.device("meta"):
+            model = Transformer(model_args)
+            print("Initialized Model on meta device at : ", datetime.now())
+            model = autonvtx(model)
 
-    print(f"Loaded in {time.time() - start_time:.2f} seconds")
+    end_time = time.perf_counter()
+    print(f"Loaded in {end_time - start_time:.4f} seconds")
     
-    if train_config.enable_fsdp and fsdp_config.pure_bf16:
-        model.to(torch.bfloat16)
+    if torch.enable_fsdp and fsdp_config.pure_bf16:
+        start_time = time.perf_counter()
+        model = model.to(torch.bfloat16)
+        end_time = time.perf_counter()
+        print(f"Model converted to bfloat16 in {end_time - start_time:.4f} seconds")
 
     return model, tokenizer
 
@@ -152,32 +163,37 @@ def setup_fsdp_model(train_config, fsdp_config, model, rank=0):
         device_mesh=hsdp_device_mesh_plan,
         device_id=device_id,
         limit_all_gathers=True,
-        sync_module_states=train_config.low_cpu_fsdp,
+        sync_module_states=True,
         param_init_fn=(
             (
                 lambda module: module.to_empty(
                     device=torch.device("cuda"), recurse=False
                 )
             )
-            if train_config.low_cpu_fsdp and rank != 0
+            if rank != 0
             else None
         ),
     )
+    
+    validate_no_params_on_meta_device(model)
+    
     if fsdp_config.fsdp_activation_checkpointing:
         apply_fsdp_checkpointing(model)
         
     if rank == 0:
-    #     # torch.device
-    #     # Get current device
-    #     current_device = torch.cuda.current_device()
-    #     stats = get_memory_stats(current_device)
-    #     (
-    #     "Memory stats after model init:"
-    #     f"\n\tGPU peak memory allocation: {stats['peak_memory_alloc']:.2f} GB"
-    #     f"\n\tGPU peak memory reserved: {stats['peak_memory_reserved']:.2f} GB"
-    #     f"\n\tGPU peak memory active: {stats['peak_memory_active']:.2f} GB"
-    # )
-        pass
+        # Get current device
+        current_device = torch.cuda.current_device()
+        # Get peak memory stats :
+        # GPU peak memory allocation
+        # GPU peak memory reserved
+        # GPU peak memory active
+        peak_memory_allocated = torch.cuda.max_memory_allocated(current_device)
+        peak_memory_reserved = torch.cuda.max_memory_reserved(current_device)
+        peak_memory_active = torch.cuda.max_memory_allocated(current_device)
+        
+        print(f"Peak Memory Allocated: {peak_memory_allocated}")
+        print(f"Peak Memory Reserved: {peak_memory_reserved}")
+        print(f"Peak Memory Active: {peak_memory_active}")
         
     # synchronize before training begins
     torch.distributed.barrier()

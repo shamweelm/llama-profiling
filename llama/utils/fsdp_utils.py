@@ -1,7 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 from torch.distributed._tensor.device_mesh import init_device_mesh
-import os 
+from torch import nn
+import os
+import torch
+import contextlib
+from typing import Generator
 
 def fsdp_auto_wrap_policy(model, transformer_layer_name):
     import functools
@@ -81,3 +85,47 @@ def hsdp_device_mesh(replica_group_size, sharding_group_size, device=None):
         raise RuntimeError("Failed to create a valid device mesh.")
 
     return device_mesh
+
+
+@contextlib.contextmanager
+def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
+    """
+    Context manager to set torch's default dtype.
+
+    Args:
+        dtype (:class:`torch.dtype`): The desired default dtype inside the context manager.
+
+    Returns:
+        ContextManager: context manager for setting default dtype.
+
+    Example:
+        >>> with set_default_dtype(torch.bfloat16):
+        >>>     x = torch.tensor([1, 2, 3])
+        >>>     x.dtype
+        torch.bfloat16
+
+
+    """
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+def validate_no_params_on_meta_device(model: nn.Module) -> None:
+    """
+    Utility to validate that model has no params or buffers on meta device.
+    If a meta param or buffer is found, an error indicating the param name will
+    be raised.
+
+    Args:
+        model (nn.Module): model to check for meta params
+
+    Raises:
+        RuntimeError: If meta params or buffers exist in model
+    """
+    for n, p in chain(model.named_parameters(), model.named_buffers()):
+        if p.is_meta:
+            raise RuntimeError(f"Unexpected param or buffer {n} on meta device.")

@@ -113,7 +113,7 @@ def setup_model(train_config, fsdp_config, rank=0):
     end_time = time.perf_counter()
     print(f"Loaded in {end_time - start_time:.4f} seconds")
     
-    if torch.enable_fsdp and fsdp_config.pure_bf16:
+    if train_config.enable_fsdp and fsdp_config.pure_bf16:
         start_time = time.perf_counter()
         model = model.to(torch.bfloat16)
         end_time = time.perf_counter()

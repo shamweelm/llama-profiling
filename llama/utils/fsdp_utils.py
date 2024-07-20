@@ -6,6 +6,7 @@ import os
 import torch
 import contextlib
 from typing import Generator
+from itertools import chain
 
 def fsdp_auto_wrap_policy(model, transformer_layer_name):
     import functools

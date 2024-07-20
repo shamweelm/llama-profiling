@@ -210,7 +210,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -218,7 +218,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
 
     def forward(
         self,

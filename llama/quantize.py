@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from functools import partial
-from model import Attention, RMSNorm, FeedForward, TransformerBlock, Transformer
+from llama.model import Attention, RMSNorm, FeedForward, TransformerBlock, Transformer
 
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w, n_bits=8):

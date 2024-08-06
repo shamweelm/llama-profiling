@@ -22,7 +22,7 @@ from datetime import datetime
 # import nvidia_dlprof_pytorch_nvtx as nvtx
 # nvtx.init(enable_function_stack=True)
 import autonvtx
-from quantize import quantize_model
+from llama.quantize import quantize_model
 
 Role = Literal["system", "user", "assistant"]
 

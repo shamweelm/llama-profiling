@@ -22,6 +22,7 @@ from datetime import datetime
 # import nvidia_dlprof_pytorch_nvtx as nvtx
 # nvtx.init(enable_function_stack=True)
 import autonvtx
+from quantize import quantize_model
 
 Role = Literal["system", "user", "assistant"]
 
@@ -108,7 +109,7 @@ class Llama:
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
         ckpt_path = checkpoints[get_model_parallel_rank()]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        checkpoint = torch.load(ckpt_path, map_location="cuda")
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -122,7 +123,16 @@ class Llama:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
+        del checkpoint
+        
         model = autonvtx(model)
+        
+        model = quantize_model(model)
+        
+        # Get the maximum memory allocated on the GPU during the generation
+        max_memory_allocated = torch.cuda.max_memory_allocated()
+        
+        print(f"Maximum memory allocated after model loading: {max_memory_allocated / 1e9:.02f} GB")
         
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
@@ -232,11 +242,15 @@ class Llama:
         # Calculate the number of generated tokens (excluding prompt tokens)
         num_tokens_generated = total_tokens_generated - total_prompt_tokens
         tokens_per_second = num_tokens_generated / time_taken
+        
+        # Get the maximum memory allocated on the GPU during the generation
+        max_memory_allocated = torch.cuda.max_memory_allocated()
 
         print(f"Number of tokens generated: {num_tokens_generated}")
         print(f"Time taken: {time_taken:.2f} seconds")
         print(f"Tokens per second: {tokens_per_second:.2f}")
-
+        print(f"Maximum memory allocated during generation: {max_memory_allocated / 1e9:.02f} GB")
+        
         if logprobs:
             token_logprobs = token_logprobs.tolist()
         out_tokens, out_logprobs = [], []

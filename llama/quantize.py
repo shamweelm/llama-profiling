@@ -170,5 +170,7 @@ def smooth_quant(model, weight_quant="per_channel", act_quant="per_token"):
 def quantize_model(model, quant_type):
     if quant_type == "smooth_quant":
         model = smooth_quant(model)
+    else:
+        raise ValueError(f"Invalid quant_type: {quant_type}")
         
     return model

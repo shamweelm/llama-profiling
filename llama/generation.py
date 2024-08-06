@@ -127,7 +127,8 @@ class Llama:
         
         model = autonvtx(model)
         
-        model = quantize_model(model)
+        quant_type = "smooth_quant"
+        model = quantize_model(model, quant_type)
         
         # Get the maximum memory allocated on the GPU during the generation
         max_memory_allocated = torch.cuda.max_memory_allocated()

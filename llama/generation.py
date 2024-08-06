@@ -19,8 +19,8 @@ from fairscale.nn.model_parallel.initialize import (
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
 from datetime import datetime
-import nvidia_dlprof_pytorch_nvtx as nvtx
-nvtx.init(enable_function_stack=True)
+# import nvidia_dlprof_pytorch_nvtx as nvtx
+# nvtx.init(enable_function_stack=True)
 import autonvtx
 
 Role = Literal["system", "user", "assistant"]
@@ -161,6 +161,9 @@ class Llama:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
+        # Start time for measuring duration
+        start_time = time.perf_counter()
+        
         params = self.model.params
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
@@ -216,6 +219,23 @@ class Llama:
             prev_pos = cur_pos
             if all(eos_reached):
                 break
+        
+        # Calculate the number of tokens generated and time taken
+        end_time = time.perf_counter()
+        time_taken = end_time - start_time
+        # Calculate the total number of tokens (including padding and prompt tokens)
+        total_tokens_generated = (tokens != pad_id).sum().item()
+
+        # Calculate the number of prompt tokens
+        total_prompt_tokens = sum(len(t) for t in prompt_tokens)
+
+        # Calculate the number of generated tokens (excluding prompt tokens)
+        num_tokens_generated = total_tokens_generated - total_prompt_tokens
+        tokens_per_second = num_tokens_generated / time_taken
+
+        print(f"Number of tokens generated: {num_tokens_generated}")
+        print(f"Time taken: {time_taken:.2f} seconds")
+        print(f"Tokens per second: {tokens_per_second:.2f}")
 
         if logprobs:
             token_logprobs = token_logprobs.tolist()

@@ -152,17 +152,17 @@ def smooth_quant(model, weight_quant="per_channel", act_quant="per_token"):
             )
             
         elif isinstance(module, Attention):
-            module.w_q = W8A8Linear.from_float(
-                module.w_q, weight_quant=weight_quant, act_quant=act_quant
+            module.wq = W8A8Linear.from_float(
+                module.wq, weight_quant=weight_quant, act_quant=act_quant
             )
-            module.w_k = W8A8Linear.from_float(
-                module.w_k, weight_quant=weight_quant, act_quant=act_quant
+            module.wk = W8A8Linear.from_float(
+                module.wk, weight_quant=weight_quant, act_quant=act_quant
             )
-            module.w_v = W8A8Linear.from_float(
-                module.w_v, weight_quant=weight_quant, act_quant=act_quant
+            module.wv = W8A8Linear.from_float(
+                module.wv, weight_quant=weight_quant, act_quant=act_quant
             )
-            module.w_o = W8A8Linear.from_float(
-                module.w_o, weight_quant=weight_quant, act_quant=act_quant
+            module.wo = W8A8Linear.from_float(
+                module.wo, weight_quant=weight_quant, act_quant=act_quant
             )
             
     return model

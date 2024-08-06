@@ -204,34 +204,38 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = ColumnParallelLinear(
-            args.dim,
-            args.n_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wk = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wv = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wo = RowParallelLinear(
-            args.n_heads * self.head_dim,
-            args.dim,
-            bias=False,
-            input_is_parallel=True,
-            init_method=lambda x: x,
-        )
+        # self.wq = ColumnParallelLinear(
+        #     args.dim,
+        #     args.n_heads * self.head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        self.wq = torch.nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        # self.wk = ColumnParallelLinear(
+        #     args.dim,
+        #     self.n_kv_heads * self.head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        self.wk = torch.nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # self.wv = ColumnParallelLinear(
+        #     args.dim,
+        #     self.n_kv_heads * self.head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        self.wv = torch.nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # self.wo = RowParallelLinear(
+        #     args.n_heads * self.head_dim,
+        #     args.dim,
+        #     bias=False,
+        #     input_is_parallel=True,
+        #     init_method=lambda x: x,
+        # )
+        self.wo = torch.nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
         self.cache_k = torch.zeros(
             (
@@ -334,15 +338,18 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
-        self.w2 = RowParallelLinear(
-            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-        )
-        self.w3 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
+        # self.w1 = ColumnParallelLinear(
+        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        # )
+        self.w1 = torch.nn.Linear(dim, hidden_dim, bias=False)
+        # self.w2 = RowParallelLinear(
+        #     hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
+        # )
+        self.w2 = torch.nn.Linear(hidden_dim, dim, bias=False)
+        # self.w3 = ColumnParallelLinear(
+        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        # )
+        self.w3 = torch.nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))

@@ -18,6 +18,8 @@ def main(
     max_seq_len: int = 128,
     max_gen_len: int = 64,
     max_batch_size: int = 4,
+    quant_type: str = "int4_weight_only",
+    load_quantized: bool = False,
 ):
     """
     Entry point of the program for generating text using a pretrained model.
@@ -38,6 +40,8 @@ def main(
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
+        quant_type=quant_type,
+        load_quantized=load_quantized,
     )
 
     prompts: List[str] = [

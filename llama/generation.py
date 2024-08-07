@@ -62,6 +62,8 @@ class Llama:
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
+        quant_type: Optional[str] = "int4_weight_only",
+        load_quantized: bool = False,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -103,35 +105,56 @@ class Llama:
             sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        assert model_parallel_size == len(
-            checkpoints
-        ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
-        ckpt_path = checkpoints[get_model_parallel_rank()]
-        checkpoint = torch.load(ckpt_path, map_location="cuda")
-        with open(Path(ckpt_dir) / "params.json", "r") as f:
-            params = json.loads(f.read())
+        
+        if not load_quantized:
+            checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
+            assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
+            assert model_parallel_size == len(
+                checkpoints
+            ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
+            ckpt_path = checkpoints[get_model_parallel_rank()]
+            checkpoint = torch.load(ckpt_path, map_location="cuda")
+            with open(Path(ckpt_dir) / "params.json", "r") as f:
+                params = json.loads(f.read())
 
-        model_args: ModelArgs = ModelArgs(
-            max_seq_len=max_seq_len,
-            max_batch_size=max_batch_size,
-            **params,
-        )
-        tokenizer = Tokenizer(model_path=tokenizer_path)
-        model_args.vocab_size = tokenizer.n_words
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        model = Transformer(model_args)
-        model.load_state_dict(checkpoint, strict=False)
-        del checkpoint
+            model_args: ModelArgs = ModelArgs(
+                max_seq_len=max_seq_len,
+                max_batch_size=max_batch_size,
+                **params,
+            )
+            tokenizer = Tokenizer(model_path=tokenizer_path)
+            model_args.vocab_size = tokenizer.n_words
+            torch.set_default_tensor_type(torch.cuda.HalfTensor)
+            model = Transformer(model_args)
+            model.load_state_dict(checkpoint, strict=False)
+            del checkpoint
+            
+            if quant_type is not None:
+                model = quantize_model(model, quant_type)
+            
+                # Save the model to the checkpoint directory inside quantized subdirectory
+                torch.save(model.state_dict(), Path(ckpt_dir) / "quantized" / f"{quant_type}_model.pth")    
         
-        quant_type = "int4_weight"
-        quantized_model = quantize_model(model, quant_type)
-        
-        # Save the model to the checkpoint directory inside quantized subdirectory
-        torch.save(quantized_model.state_dict(), Path(ckpt_dir) / "quantized" / f"{quant_type}_model.pth")
-        
-        quantized_model = autonvtx(quantized_model)
+            model = autonvtx(model)
+            
+        else:
+            checkpoint = torch.load(Path(ckpt_dir) / "quantized" / f"{quant_type}_model.pth", map_location="cuda")
+            with open(Path(ckpt_dir) / "params.json", "r") as f:
+                params = json.loads(f.read())
+                
+            model_args: ModelArgs = ModelArgs(
+                max_seq_len=max_seq_len,
+                max_batch_size=max_batch_size,
+                **params,
+            )
+            
+            tokenizer = Tokenizer(model_path=tokenizer_path)
+            model_args.vocab_size = tokenizer.n_words
+            model = Transformer(model_args)
+            model.load_state_dict(checkpoint, strict=False)
+            del checkpoint
+            
+            model = autonvtx(model)
         
         # Get the maximum memory allocated on the GPU during the generation
         max_memory_allocated = torch.cuda.max_memory_allocated()
@@ -140,7 +163,7 @@ class Llama:
         
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
-        return Llama(quantized_model, tokenizer)
+        return Llama(model, tokenizer)
 
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model

@@ -167,9 +167,23 @@ def smooth_quant(model, weight_quant="per_channel", act_quant="per_token"):
             
     return model
 
+def int4_weight_only(model):
+    from torchao.quantization.GPTQ import Int4WeightOnlyQuantizer
+    
+    groupsize = 64
+    quantizer = Int4WeightOnlyQuantizer(
+        groupsize,
+    )
+    quantized_model = quantizer.quantize(model)
+    
+    return quantized_model
+
+
 def quantize_model(model, quant_type):
     if quant_type == "smooth_quant":
         model = smooth_quant(model)
+    elif quant_type == "int4_weight":
+        model = int4_weight_only(model)
     else:
         raise ValueError(f"Invalid quant_type: {quant_type}")
         

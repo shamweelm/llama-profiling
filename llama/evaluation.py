@@ -21,7 +21,7 @@ from torchao._models._eval import TransformerEvalWrapper, InputRecorder
 from tokenizer import get_tokenizer
 import time
 from torchao.quantization.GPTQ import Int4WeightOnlyGPTQQuantizer
-from torchao._models.llama.model import prepare_inputs_for_model
+from llama.model import prepare_inputs_for_model
 from torchao.utils import TORCH_VERSION_AFTER_2_5
 
 def run_evaluation(

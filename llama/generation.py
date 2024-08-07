@@ -62,7 +62,7 @@ class Llama:
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
-        quant_type: Optional[str] = "int4_weight_only",
+        quant_type: Optional[str] = None,
         load_quantized: bool = False,
     ) -> "Llama":
         """
@@ -107,6 +107,7 @@ class Llama:
         start_time = time.time()
         
         if not load_quantized:
+            print(f"Loading model from {ckpt_dir} with Load Quantized set to {load_quantized}")
             checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
             assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
             assert model_parallel_size == len(
@@ -130,6 +131,7 @@ class Llama:
             del checkpoint
             
             if quant_type is not None:
+                print(f"Quantizing model with {quant_type}")
                 model = quantize_model(model, quant_type)
             
                 # Save the model to the checkpoint directory inside quantized subdirectory
@@ -138,6 +140,7 @@ class Llama:
             model = autonvtx(model)
             
         else:
+            print(f"Loading quantized model from {ckpt_dir} with Load Quantized set to {load_quantized}")
             checkpoint = torch.load(Path(ckpt_dir) / "quantized" / f"{quant_type}_model.pth", map_location="cuda")
             with open(Path(ckpt_dir) / "params.json", "r") as f:
                 params = json.loads(f.read())

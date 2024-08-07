@@ -1,68 +1,119 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# copied from https://github.com/pytorch-labs/gpt-fast/blob/main/tokenizer.py
 
 import os
-from logging import getLogger
-from typing import List
+import sentencepiece as spm
+try:
+    import tiktoken
+    from tiktoken.load import load_tiktoken_bpe
+except:
+    pass
+from pathlib import Path
+from typing import Dict
 
-from sentencepiece import SentencePieceProcessor
+class TokenizerInterface:
+    def __init__(self, model_path):
+        self.model_path = model_path
 
+    def encode(self, text):
+        raise NotImplementedError("This method should be overridden by subclasses.")
 
-logger = getLogger()
+    def decode(self, tokens):
+        raise NotImplementedError("This method should be overridden by subclasses.")
 
+    def bos_id(self):
+        raise NotImplementedError("This method should be overridden by subclasses.")
 
-class Tokenizer:
-    """tokenizing and encoding/decoding text using SentencePiece."""
-    def __init__(self, model_path: str):
-        """
-        Initializes the Tokenizer with a SentencePiece model.
+    def eos_id(self):
+        raise NotImplementedError("This method should be overridden by subclasses.")
 
-        Args:
-            model_path (str): The path to the SentencePiece model file.
-        """
-        # reload tokenizer
-        assert os.path.isfile(model_path), model_path
-        self.sp_model = SentencePieceProcessor(model_file=model_path)
-        logger.info(f"Reloaded SentencePiece model from {model_path}")
+class SentencePieceWrapper(TokenizerInterface):
+    def __init__(self, model_path):
+        super().__init__(model_path)
+        self.processor = spm.SentencePieceProcessor(str(model_path))
+        self.bos_token_id = self.bos_id()
+        self.eos_token_id = self.eos_id()
 
-        # BOS / EOS token IDs
-        self.n_words: int = self.sp_model.vocab_size()
-        self.bos_id: int = self.sp_model.bos_id()
-        self.eos_id: int = self.sp_model.eos_id()
-        self.pad_id: int = self.sp_model.pad_id()
-        logger.info(
-            f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
+    def encode(self, text):
+        return self.processor.EncodeAsIds(text)
+
+    def decode(self, tokens):
+        return self.processor.DecodeIds(tokens)
+
+    def bos_id(self):
+        return self.processor.bos_id()
+
+    def eos_id(self):
+        return self.processor.eos_id()
+
+class TiktokenWrapper(TokenizerInterface):
+    """
+    Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
+    """
+
+    special_tokens: Dict[str, int]
+
+    num_reserved_special_tokens = 256
+
+    pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # noqa: E501
+
+    def __init__(self, model_path):
+        super().__init__(model_path)
+        assert os.path.isfile(model_path), str(model_path)
+        mergeable_ranks = load_tiktoken_bpe(str(model_path))
+        num_base_tokens = len(mergeable_ranks)
+        special_tokens = [
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|reserved_special_token_0|>",
+            "<|reserved_special_token_1|>",
+            "<|reserved_special_token_2|>",
+            "<|reserved_special_token_3|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|reserved_special_token_4|>",
+            "<|eot_id|>",  # end of turn
+        ] + [
+            f"<|reserved_special_token_{i}|>"
+            for i in range(5, self.num_reserved_special_tokens - 5)
+        ]
+        self.special_tokens = {
+            token: num_base_tokens + i for i, token in enumerate(special_tokens)
+        }
+        self.model = tiktoken.Encoding(
+            name=Path(model_path).name,
+            pat_str=self.pat_str,
+            mergeable_ranks=mergeable_ranks,
+            special_tokens=self.special_tokens,
         )
-        assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
+        # BOS / EOS token IDs
+        self._bos_id: int = self.special_tokens["<|begin_of_text|>"]
+        self._eos_id: int = self.special_tokens["<|end_of_text|>"]
+        self.bos_token_id = self.bos_id()
+        self.eos_token_id = self.eos_id()
 
-    def encode(self, s: str, bos: bool, eos: bool) -> List[int]:
-        """
-        Encodes a string into a list of token IDs.
+    def encode(self, text):
+        return self.model.encode(text)
 
-        Args:
-            s (str): The input string to be encoded.
-            bos (bool): Whether to prepend the beginning-of-sequence token.
-            eos (bool): Whether to append the end-of-sequence token.
+    def decode(self, tokens):
+        return self.model.decode(tokens)
 
-        Returns:
-            List[int]: A list of token IDs.
-        """
-        assert type(s) is str
-        t = self.sp_model.encode(s)
-        if bos:
-            t = [self.bos_id] + t
-        if eos:
-            t = t + [self.eos_id]
-        return t
+    def bos_id(self):
+        return self._bos_id
 
-    def decode(self, t: List[int]) -> str:
-        """
-        Decodes a list of token IDs into a string.
+    def eos_id(self):
+        return self._eos_id
 
-        Args:
-            t (List[int]): The list of token IDs to be decoded.
+def get_tokenizer(tokenizer_model_path, model_name):
+    """
+    Factory function to get the appropriate tokenizer based on the model name.
 
-        Returns:
-            str: The decoded string.
-        """
-        return self.sp_model.decode(t)
+    Args:
+    - tokenizer_model_path (str): The file path to the tokenizer model.
+    - model_name (str): The name of the model, used to determine the tokenizer type.
+    Returns:
+    - TokenizerInterface: An instance of a tokenizer.
+    """
+    if "Llama-3" in str(model_name):
+        return TiktokenWrapper(tokenizer_model_path)
+    else:
+        return SentencePieceWrapper(tokenizer_model_path)

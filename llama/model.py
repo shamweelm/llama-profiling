@@ -1,502 +1,304 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
 
-import math
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
-import fairscale.nn.model_parallel.initialize as fs_init
 import torch
-import torch.nn.functional as F
-from fairscale.nn.model_parallel.layers import (
-    ColumnParallelLinear,
-    ParallelEmbedding,
-    RowParallelLinear,
-)
-from torch import nn
+import torch.nn as nn
+from torch import Tensor
+from torch.nn import functional as F
+from torchao.utils import find_multiple
 
+# TODO remove suplerfluous arg
+def prepare_inputs_for_model(inps, max_new_tokens=1):
+    # this is because input from lm-eval is 2d
+    if inps.dim() > 2:
+        raise ValueError(f"Expected input to be of dim 1 or 2, but got {inps.dim()}")
+
+    input_pos = torch.arange(0, inps.numel(), device=inps.device)
+    return (inps.view(1, -1), input_pos)
 
 @dataclass
 class ModelArgs:
+    block_size: int = 2048
+    vocab_size: int = 32000
+    n_layer: int = 32
+    n_head: int = 32
     dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: int = -1  # defined later by tokenizer
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
+    intermediate_size: int = None
+    n_local_heads: int = -1
+    head_dim: int = 64
+    rope_base: float = 10000
     norm_eps: float = 1e-5
 
-    max_batch_size: int = 32
-    max_seq_len: int = 2048
+    def __post_init__(self):
+        if self.n_local_heads == -1:
+            self.n_local_heads = self.n_head
+        if self.intermediate_size is None:
+            hidden_dim = 4 * self.dim
+            n_hidden = int(2 * hidden_dim / 3)
+            self.intermediate_size = find_multiple(n_hidden, 256)
+        self.head_dim = self.dim // self.n_head
+
+    @classmethod
+    def from_name(cls, name: str):
+        if name in transformer_configs:
+            return cls(**transformer_configs[name])
+        # fuzzy search
+        config = [config for config in transformer_configs if config in str(name).upper() or config in str(name)]
+
+        # We may have two or more configs matched (e.g. "7B" and "Mistral-7B"). Find the best config match,
+        # take longer name (as it have more symbols matched)
+        if len(config) > 1:
+            config.sort(key=len, reverse=True)
+            assert len(config[0]) != len(config[1]), name # make sure only one 'best' match
+
+        return cls(**transformer_configs[config[0]])
 
 
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        """
-        Initialize the RMSNorm normalization layer.
+transformer_configs = {
+    "CodeLlama-7b-Python-hf": dict(block_size=16384, vocab_size=32000, n_layer=32, dim = 4096, rope_base=1000000),
+    "7B": dict(n_layer=32, n_head=32, dim=4096),
+    "13B": dict(n_layer=40, n_head=40, dim=5120),
+    "30B": dict(n_layer=60, n_head=52, dim=6656),
+    "34B": dict(n_layer=48, n_head=64, dim=8192, vocab_size=32000, n_local_heads=8, intermediate_size=22016, rope_base=1000000), # CodeLlama-34B-Python-hf
+    "70B": dict(n_layer=80, n_head=64, dim=8192, n_local_heads=8, intermediate_size=28672),
+    "Mistral-7B": dict(n_layer=32, n_head=32, n_local_heads=8, dim=4096, intermediate_size=14336, vocab_size=32000),
+    "stories15M": dict(n_layer=6, n_head=6, dim=288),
+    "stories110M": dict(n_layer=12, n_head=12, dim=768),
+    "Llama-3-8B": dict(block_size=8192, n_layer=32, n_head=32, n_local_heads=8, dim=4096, intermediate_size=14336, vocab_size=128256),
+}
 
-        Args:
-            dim (int): The dimension of the input tensor.
-            eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+# this is a model specific variable that controls whether index_put is used for the kv_cache update, 
+# it is needed for GPTQ but otherwise attenuates perf so the default is to not use it
+use_index_put_for_kv_cache = False
 
-        Attributes:
-            eps (float): A small value added to the denominator for numerical stability.
-            weight (nn.Parameter): Learnable scaling parameter.
+class KVCache(nn.Module):
+    def __init__(self, max_batch_size, max_seq_length, n_heads, head_dim, dtype=torch.bfloat16):
+        super().__init__()
+        cache_shape = (max_batch_size, n_heads, max_seq_length, head_dim)
+        self.register_buffer('k_cache', torch.zeros(cache_shape, dtype=dtype))
+        self.register_buffer('v_cache', torch.zeros(cache_shape, dtype=dtype))
 
-        """
+    def update(self, input_pos, k_val, v_val):
+        # input_pos: [S], k_val: [B, H, S, D]
+        assert input_pos.shape[0] == k_val.shape[2]
+
+        if use_index_put_for_kv_cache:
+            k_out = torch.ops.aten.index_put_(self.k_cache, [None, None, input_pos], k_val)
+            v_out = torch.ops.aten.index_put_(self.v_cache, [None, None, input_pos], v_val)
+        else:
+            k_out = self.k_cache
+            v_out = self.v_cache
+            k_out[:, :, input_pos] = k_val
+            v_out[:, :, input_pos] = v_val
+
+        return k_out, v_out
+
+
+from torchao.quantization.quant_primitives import quantize_affine, dequantize_affine
+from torchao.quantization.utils import quantize_activation_per_token_absmax
+
+class AffineQuantizedKVCache(nn.Module):
+    def __init__(self, max_batch_size, max_seq_length, n_heads, head_dim, scale_dtype=torch.bfloat16):
+        super().__init__()
+        cache_shape = (max_batch_size, n_heads, max_seq_length, head_dim)
+        scale_shape = (max_batch_size, n_heads, max_seq_length, 1)
+        self.register_buffer('k_cache', torch.zeros(cache_shape, dtype=torch.int8))
+        self.register_buffer('v_cache', torch.zeros(cache_shape, dtype=torch.int8))
+        self.register_buffer('k_cache_scale', torch.ones(scale_shape, dtype=scale_dtype))
+        self.register_buffer('v_cache_scale', torch.ones(scale_shape, dtype=scale_dtype))
+    
+    def update(self, input_pos, k_val, v_val):
+        # quantize current k_val and store it in the cache
+        q_k_val, k_scale = quantize_activation_per_token_absmax(k_val)
+        self.k_cache[:, :, input_pos] = q_k_val
+        self.k_cache_scale[:, :, input_pos] = k_scale.unsqueeze(-1)
+        k_out = self.k_cache*self.k_cache_scale
+        k_out[:, :, input_pos] = k_val
+
+        q_v_val, v_scale = quantize_activation_per_token_absmax(v_val)
+        self.v_cache[:, :, input_pos] = q_v_val
+        self.v_cache_scale[:, :, input_pos] = v_scale.unsqueeze(-1)
+        v_out = self.v_cache*self.v_cache_scale
+        v_out[:, :, input_pos] = v_val
+        
+        return k_out, v_out
+
+    @classmethod
+    def from_float(cls, kv_cache):
+        cache_shape = kv_cache.k_cache.shape
+        max_batch_size, n_heads, max_seq_length, head_dim = cache_shape
+        scale_dtype = kv_cache.k_cache.dtype
+        return cls(max_batch_size, max_seq_length, n_heads, head_dim, scale_dtype)
+
+class Transformer(nn.Module):
+    def __init__(self, config: ModelArgs) -> None:
+        super().__init__()
+        self.config = config
+
+        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
+        self.layers = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+
+        self.freqs_cis: Optional[Tensor] = None
+        self.mask_cache: Optional[Tensor] = None
+        self.max_batch_size = -1
+        self.max_seq_length = -1
+
+    def setup_caches(self, max_batch_size, max_seq_length):
+        if self.max_seq_length >= max_seq_length and self.max_batch_size >= max_batch_size:
+            return
+        head_dim = self.config.dim // self.config.n_head
+        max_seq_length = find_multiple(max_seq_length, 8)
+        self.max_seq_length = max_seq_length
+        self.max_batch_size = max_batch_size
+        dtype = self.output.weight.dtype
+        # For quantized layers, dtype is encoded in scales
+        if hasattr(self.output, "scales"):
+            dtype = self.output.scales.dtype
+        elif hasattr(self.output, "scales_and_zeros"):
+            dtype = self.output.scales_and_zeros.dtype
+        for b in self.layers:
+            b.attention.kv_cache = KVCache(max_batch_size, max_seq_length, self.config.n_local_heads, head_dim, dtype)
+
+        self.freqs_cis = precompute_freqs_cis(self.config.block_size, self.config.dim // self.config.n_head, self.config.rope_base, dtype)
+        self.causal_mask = torch.tril(torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool))
+
+    def forward(self, idx: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
+        assert self.freqs_cis is not None, "Caches must be initialized first"
+        mask = self.causal_mask[None, None, input_pos]
+        freqs_cis = self.freqs_cis[input_pos]
+        x = self.tok_embeddings(idx)
+
+        for i, layer in enumerate(self.layers):
+            x = layer(x, input_pos, freqs_cis, mask)
+        x = self.norm(x)
+        logits = self.output(x)
+        return logits
+
+    @classmethod
+    def from_name(cls, name: str):
+        return cls(ModelArgs.from_name(name))
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, config: ModelArgs) -> None:
+        super().__init__()
+        self.attention = Attention(config)
+        self.feed_forward = FeedForward(config)
+        self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
+        self.attention_norm = RMSNorm(config.dim, config.norm_eps)
+
+    def forward(self, x: Tensor, input_pos: Tensor, freqs_cis: Tensor, mask: Tensor) -> Tensor:
+        h = x + self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
+
+
+class Attention(nn.Module):
+    def __init__(self, config: ModelArgs):
+        super().__init__()
+        assert config.dim % config.n_head == 0
+
+        total_head_dim = (config.n_head + 2 * config.n_local_heads) * config.head_dim
+        # key, query, value projections for all heads, but in a batch
+        self.wqkv = nn.Linear(config.dim, total_head_dim, bias=False)
+        self.wo = nn.Linear(config.dim, config.dim, bias=False)
+        self.kv_cache = None
+
+        self.n_head = config.n_head
+        self.head_dim = config.head_dim
+        self.n_local_heads = config.n_local_heads
+        self.dim = config.dim
+        self._register_load_state_dict_pre_hook(self.load_hook)
+
+    def load_hook(self, state_dict, prefix, *args):
+        if prefix + "wq.weight" in state_dict:
+            wq = state_dict.pop(prefix + "wq.weight")
+            wk = state_dict.pop(prefix + "wk.weight")
+            wv = state_dict.pop(prefix + "wv.weight")
+            state_dict[prefix + "wqkv.weight"] = torch.cat([wq, wk, wv])
+
+    def forward(self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
+        bsz, seqlen, _ = x.shape
+
+        kv_size = self.n_local_heads * self.head_dim
+        q, k, v = self.wqkv(x).split([self.dim, kv_size, kv_size], dim=-1)
+
+        q = q.view(bsz, seqlen, self.n_head, self.head_dim)
+        k = k.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        v = v.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+
+        q = apply_rotary_emb(q, freqs_cis)
+        k = apply_rotary_emb(k, freqs_cis)
+
+        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+
+        if self.kv_cache is not None:
+            k, v = self.kv_cache.update(input_pos, k, v)
+
+        k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+        v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+
+        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
+
+        y = self.wo(y)
+        return y
+
+
+class FeedForward(nn.Module):
+    def __init__(self, config: ModelArgs) -> None:
+        super().__init__()
+        self.w1 = nn.Linear(config.dim, config.intermediate_size, bias=False)
+        self.w3 = nn.Linear(config.dim, config.intermediate_size, bias=False)
+        self.w2 = nn.Linear(config.intermediate_size, config.dim, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
-        """
-        Apply the RMSNorm normalization to the input tensor.
+        return x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + self.eps)
 
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The normalized tensor.
-
-        """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        """
-        Forward pass through the RMSNorm layer.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The output tensor after applying RMSNorm.
-
-        """
+    def forward(self, x: Tensor) -> Tensor:
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
-
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
-    and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
-
-    Args:
-        dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
-
-    
-        
-
-    """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+def precompute_freqs_cis(
+    seq_len: int, n_elem: int, base: int = 10000,
+    dtype: torch.dtype = torch.bfloat16
+) -> Tensor:
+    freqs = 1.0 / (base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem))
+    t = torch.arange(seq_len, device=freqs.device)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    cache = torch.stack([freqs_cis.real, freqs_cis.imag], dim=-1)
+    return cache.to(dtype=dtype)
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
-    """
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor.
-
-    This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-    returned as real tensors.
-
-    Args:
-        xq (torch.Tensor): Query tensor to apply rotary embeddings.
-        xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-
-        
-
-    """
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        x[:, :, :, None, :]
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
+    xshaped = x.float().reshape(*x.shape[:-1], -1, 2)
+    freqs_cis = freqs_cis.view(1, xshaped.size(1), 1, xshaped.size(3), 2)
+    x_out2 = torch.stack(
+        [
+            xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1],
+            xshaped[..., 1] * freqs_cis[..., 0] + xshaped[..., 0] * freqs_cis[..., 1],
+        ],
+        -1,
     )
 
-
-class Attention(nn.Module):
-    """Multi-head attention module."""
-    def __init__(self, args: ModelArgs):
-        """
-        Initialize the Attention module.
-
-        Args:
-            args (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            n_kv_heads (int): Number of key and value heads.
-            n_local_heads (int): Number of local query heads.
-            n_local_kv_heads (int): Number of local key and value heads.
-            n_rep (int): Number of repetitions for local heads.
-            head_dim (int): Dimension size of each attention head.
-            wq (ColumnParallelLinear): Linear transformation for queries.
-            wk (ColumnParallelLinear): Linear transformation for keys.
-            wv (ColumnParallelLinear): Linear transformation for values.
-            wo (RowParallelLinear): Linear transformation for output.
-            cache_k (torch.Tensor): Cached keys for attention.
-            cache_v (torch.Tensor): Cached values for attention.
-
-        """
-        super().__init__()
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        model_parallel_size = fs_init.get_model_parallel_world_size()
-        self.n_local_heads = args.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self.head_dim = args.dim // args.n_heads
-
-        # self.wq = ColumnParallelLinear(
-        #     args.dim,
-        #     args.n_heads * self.head_dim,
-        #     bias=False,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        self.wq = torch.nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        # self.wk = ColumnParallelLinear(
-        #     args.dim,
-        #     self.n_kv_heads * self.head_dim,
-        #     bias=False,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        self.wk = torch.nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        # self.wv = ColumnParallelLinear(
-        #     args.dim,
-        #     self.n_kv_heads * self.head_dim,
-        #     bias=False,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        self.wv = torch.nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        # self.wo = RowParallelLinear(
-        #     args.n_heads * self.head_dim,
-        #     args.dim,
-        #     bias=False,
-        #     input_is_parallel=True,
-        #     init_method=lambda x: x,
-        # )
-        self.wo = torch.nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-
-        self.cache_k = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-    ):
-        """
-        Forward pass of the attention module.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            start_pos (int): Starting position for caching.
-            freqs_cis (torch.Tensor): Precomputed frequency tensor.
-            mask (torch.Tensor, optional): Attention mask tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after attention.
-
-        """
-        bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
-
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(output)
-
-
-class FeedForward(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
-    ):
-        """
-        Initialize the FeedForward module.
-
-        Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-            ffn_dim_multiplier (float, optional): Custom multiplier for hidden dimension. Defaults to None.
-
-        Attributes:
-            w1 (ColumnParallelLinear): Linear transformation for the first layer.
-            w2 (RowParallelLinear): Linear transformation for the second layer.
-            w3 (ColumnParallelLinear): Linear transformation for the third layer.
-
-        """
-        super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        # custom dim factor multiplier
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-        # self.w1 = ColumnParallelLinear(
-        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        # )
-        self.w1 = torch.nn.Linear(dim, hidden_dim, bias=False)
-        # self.w2 = RowParallelLinear(
-        #     hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-        # )
-        self.w2 = torch.nn.Linear(hidden_dim, dim, bias=False)
-        # self.w3 = ColumnParallelLinear(
-        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        # )
-        self.w3 = torch.nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-
-class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
-        """
-        Initialize a TransformerBlock.
-
-        Args:
-            layer_id (int): Identifier for the layer.
-            args (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            n_heads (int): Number of attention heads.
-            dim (int): Dimension size of the model.
-            head_dim (int): Dimension size of each attention head.
-            attention (Attention): Attention module.
-            feed_forward (FeedForward): FeedForward module.
-            layer_id (int): Identifier for the layer.
-            attention_norm (RMSNorm): Layer normalization for attention output.
-            ffn_norm (RMSNorm): Layer normalization for feedforward output.
-
-        """
-        super().__init__()
-        self.n_heads = args.n_heads
-        self.dim = args.dim
-        self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            multiple_of=args.multiple_of,
-            ffn_dim_multiplier=args.ffn_dim_multiplier,
-        )
-        self.layer_id = layer_id
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-    ):
-        """
-        Perform a forward pass through the TransformerBlock.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            start_pos (int): Starting position for attention caching.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
-            mask (torch.Tensor, optional): Masking tensor for attention. Defaults to None.
-
-        Returns:
-            torch.Tensor: Output tensor after applying attention and feedforward layers.
-
-        """
-        h = x + self.attention(
-            self.attention_norm(x), start_pos, freqs_cis, mask
-        )
-        out = h + self.feed_forward(self.ffn_norm(h))
-        return out
-
-
-class Transformer(nn.Module):
-    def __init__(self, params: ModelArgs):
-        """
-        Initialize a Transformer model.
-
-        Args:
-            params (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            params (ModelArgs): Model configuration parameters.
-            vocab_size (int): Vocabulary size.
-            n_layers (int): Number of layers in the model.
-            tok_embeddings (ParallelEmbedding): Token embeddings.
-            layers (torch.nn.ModuleList): List of Transformer blocks.
-            norm (RMSNorm): Layer normalization for the model output.
-            output (ColumnParallelLinear): Linear layer for final output.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
-
-        """
-        super().__init__()
-        self.params = params
-        self.vocab_size = params.vocab_size
-        self.n_layers = params.n_layers
-
-        self.tok_embeddings = ParallelEmbedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
-        )
-
-        self.layers = torch.nn.ModuleList()
-        for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
-
-        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = ColumnParallelLinear(
-            params.dim, params.vocab_size, bias=False, init_method=lambda x: x
-        )
-
-        self.freqs_cis = precompute_freqs_cis(
-            # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096. 
-            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
-            self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
-        )
-
-    @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int):
-        """
-        Perform a forward pass through the Transformer model.
-
-        Args:
-            tokens (torch.Tensor): Input token indices.
-            start_pos (int): Starting position for attention caching.
-
-        Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
-
-        """
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
-
-        mask = None
-        if seqlen > 1:
-            mask = torch.full(
-                (seqlen, seqlen), float("-inf"), device=tokens.device
-            )
-
-            mask = torch.triu(mask, diagonal=1)
-
-            # When performing key-value caching, we compute the attention scores
-            # only for the new sequence. Thus, the matrix of scores is of size
-            # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack([
-                torch.zeros((seqlen, start_pos), device=tokens.device),
-                mask
-            ]).type_as(h)
-
-        for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)
-        output = self.output(h).float()
-        return output
+    x_out2 = x_out2.flatten(3)
+    return x_out2.type_as(x)

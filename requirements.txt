@@ -3,3 +3,4 @@ fairscale
 fire
 sentencepiece
 autonvtx
+huggingface_hub[cli]

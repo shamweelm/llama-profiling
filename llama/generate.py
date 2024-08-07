@@ -144,13 +144,19 @@ def encode_tokens(tokenizer, string, bos=True, device=default_device):
     return torch.tensor(tokens, dtype=torch.int, device=device)
 
 def _load_model(checkpoint_path, device, precision):
-    checkpoint = torch.load(str(checkpoint_path), mmap=True, weights_only=True)
+    checkpoint = torch.load(str(checkpoint_path), weights_only=True, map_location='cuda')
+    print(f"Loaded checkpoint from {checkpoint_path}")
     if "model" in checkpoint and "stories" in str(checkpoint_path):
         checkpoint = checkpoint["model"]
 
+    # Load model using device and precision
     model = Transformer.from_name(checkpoint_path.parent.name)
+    # model = Transformer.from_name(checkpoint_path.parent.name)
+    print(f"Loaded model {model.__class__.__name__} from {checkpoint_path.parent.name}")
     model.load_state_dict(checkpoint, assign=True)
+    print(f"Loaded model state dict from {checkpoint_path}")
     model = model.to(device=device, dtype=precision)
+    print(f"Model loaded to {device} with precision {precision}")
 
     return model.eval()
 

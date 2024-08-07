@@ -125,10 +125,13 @@ class Llama:
         model.load_state_dict(checkpoint, strict=False)
         del checkpoint
         
-        model = autonvtx(model)
+        quant_type = "int4_weight"
+        quantized_model = quantize_model(model, quant_type)
         
-        quant_type = "smooth_quant"
-        model = quantize_model(model, quant_type)
+        # Save the model to the checkpoint directory inside quantized subdirectory
+        torch.save(quantized_model.state_dict(), Path(ckpt_dir) / "quantized" / f"{quant_type}_model.pth")
+        
+        quantized_model = autonvtx(quantized_model)
         
         # Get the maximum memory allocated on the GPU during the generation
         max_memory_allocated = torch.cuda.max_memory_allocated()
@@ -137,7 +140,7 @@ class Llama:
         
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
-        return Llama(model, tokenizer)
+        return Llama(quantized_model, tokenizer)
 
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model

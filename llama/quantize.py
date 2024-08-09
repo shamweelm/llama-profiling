@@ -92,7 +92,7 @@ def replace_linearlayer(base_model, quantizer_class, exclude_list, quantized=Tru
             replace_linearlayer(child, quantizer_class, exclude_list, quantized=quantized)
             
 
-def get_memory_footprint(model, input_size=(1, 2048), device='cuda'):
+def get_memory_footprint(model, tokenizer, device='cuda'):
     """
     Function to check the memory occupied by a large language model like LLaMA.
     
@@ -110,7 +110,11 @@ def get_memory_footprint(model, input_size=(1, 2048), device='cuda'):
     model.eval()
     
     # Create a dummy input of the specified size
-    dummy_input = torch.randint(0, model.vocab_size, input_size).to(device)
+    # dummy_input = torch.randint(0, model.vocab_size, input_size).to(device)
+    prompts = [
+        "Test prompt"
+    ]
+    dummy_input = [tokenizer.encode(x, bos=True, eos=False) for x in prompts]
     
     if device == 'cuda':
         # Clear the cache and reset memory trackers

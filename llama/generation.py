@@ -128,7 +128,7 @@ class Llama:
         print(model)
         
         # Get model memory footprint
-        memory_footprint = get_memory_footprint(model)
+        memory_footprint = get_memory_footprint(model, tokenizer)
         print(f"Model memory footprint: {memory_footprint:.2f} MB")
         
         model.load_state_dict(checkpoint, strict=False)

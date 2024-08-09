@@ -119,7 +119,7 @@ def get_memory_footprint(model, input_size=(1, 2048), device='cuda'):
 
         # Forward pass
         with torch.no_grad():
-            model(dummy_input)
+            model(dummy_input, start_pos = 0)
 
         # Get memory usage in bytes and convert to MB
         memory_footprint = torch.cuda.max_memory_allocated(device) / (1024 ** 2)

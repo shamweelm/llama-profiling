@@ -7,7 +7,10 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
-from llama.quantize import get_memory_footprint
+from llama.quantize import get_memory_footprint, quantize_model
+
+from torchao.dtypes import to_affine_quantized
+
 
 import torch
 import torch.nn.functional as F
@@ -62,6 +65,8 @@ class Llama:
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
+        # quantization: Optional None
+        quantization: Optional[str] = None,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -109,6 +114,12 @@ class Llama:
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
         ckpt_path = checkpoints[get_model_parallel_rank()]
+        # Load the quantized model if it exists
+        quantized_ckpt_path = Path(ckpt_dir) / f"quantized_model_{quantization}.pth"
+        if quantization is not None and quantized_ckpt_path.exists():
+            print(f"Loading quantized model from {quantized_ckpt_path} as it exists")
+            ckpt_path = quantized_ckpt_path
+        
         checkpoint = torch.load(ckpt_path, map_location="cuda")
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
@@ -120,18 +131,39 @@ class Llama:
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        # torch.set_default_tensor_type(torch.cuda.HalfTensor)
         model = Transformer(model_args)
+        
+        print(f"Max memory usage: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
         
         # Print the model architecture
         print("Model architecture:")
         print(model)
         
         # Get model memory footprint
-        memory_footprint = get_memory_footprint(model, tokenizer)
+        memory_footprint = get_memory_footprint(model)
         print(f"Model memory footprint: {memory_footprint:.2f} MB")
         
+        # Load the weights in bf16
+        # model.load_state_dict(checkpoint, strict=False)
         model.load_state_dict(checkpoint, strict=False)
+        model = model.to(torch.bfloat16)
+        del checkpoint
+        
+        # Clear CUDA memory after loading the model
+        torch.cuda.empty_cache()
+        
+        print(f"Max memory usage after deleting checkpoint: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        
+        if quantization is not None:
+            model = quantize_model(model, quantization, ckpt_dir)
+
+        memory_footprint = get_memory_footprint(model)
+        print(f"Model memory footprint after quantization: {memory_footprint:.2f} MB")
+        
+        # Move the model to CUDA
+        model = model.to("cuda")
+        
         model = autonvtx(model)
         
         print(f"Loaded in {time.time() - start_time:.2f} seconds")

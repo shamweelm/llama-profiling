@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
+from llama.quantize import get_memory_footprint
 
 import torch
 import torch.nn.functional as F
@@ -126,7 +127,9 @@ class Llama:
         print("Model architecture:")
         print(model)
         
-        # raise ValueError("Stop here")
+        # Get model memory footprint
+        memory_footprint = get_memory_footprint(model)
+        print(f"Model memory footprint: {memory_footprint:.2f} MB")
         
         model.load_state_dict(checkpoint, strict=False)
         model = autonvtx(model)

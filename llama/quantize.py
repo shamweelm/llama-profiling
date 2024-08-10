@@ -14,48 +14,46 @@ from torchao.quantization.quant_api import (
 )
 from torchao.quantization.quant_primitives import MappingType, ZeroPointDomain
 import time
-from llama.utils import load_checkpoint
+from llama.utils import load_checkpoint, print_model_architecture
 
 
 class QuantizedInt8LinearLayer(nn.Module):
-    def __init__(self, in_features, out_features, bias=True, dtype=torch.float32):
+    def __init__(self, in_features, out_features, bias=True, dtype=torch.float32, device="cuda"):
         super().__init__()
 
         self.register_buffer(
             "weight",
-            torch.randint(-128, 127, (out_features, in_features)).to(torch.int8),
+            torch.randint(-128, 127, (out_features, in_features), device=device).to(torch.int8),
         )
 
-        self.register_buffer("scale", torch.randn((out_features), dtype=dtype))
+        self.register_buffer("scale", torch.randn((out_features), dtype=dtype, device=device))
 
         if bias:
-            self.register_buffer("bias", torch.randn((1, out_features), dtype=dtype))
+            self.register_buffer("bias", torch.randn((1, out_features), dtype=dtype, device=device))
         else:
             self.bias = None
 
     def quantize(self, weight):
-        # Clone the weight and outcast it to fp32 which is necessary to calculate the scale as both types must be in fp32
-        weight_f32 = weight.clone().to(torch.float32)
-
-        # calculating the min and max of int-8 quantized range. qmin=-128, qmax=127
+        # Perform quantization in smaller chunks if necessary
+        chunk_size = 1024  # Adjust based on available memory
         Qmin = torch.iinfo(torch.int8).min
         Qmax = torch.iinfo(torch.int8).max
 
-        # calculating per channel scale
-        # In per channel scale, you'll be calculating the scale for every row. So, you'll store the scale in a tensor in this case.)
-        # In per tensor scale, you'll calculate one scale for entire tensor. Per channel will be more accurate but take more memory footprint as it has to store more scale value.
-        # weight_f32.abs().max(dim=-1).values -> this give the max-value for original weight value range in fp32.
-        scale = weight_f32.abs().max(dim=-1).values / 127
-        scale = scale.to(weight.dtype)
+        for i in range(0, weight.size(0), chunk_size):
+            weight_chunk = weight[i:i+chunk_size, :].clone().to(torch.float32)
+            scale_chunk = weight_chunk.abs().max(dim=-1).values / 127
+            scale_chunk = scale_chunk.to(weight.dtype)
 
-        # This gives the quantized weight value for the given weight tensor.
-        # This formula was derived from symmetric quantization. please read the link I've shared above if you want to learn in detail.
-        quantized_weight = torch.clamp(
-            torch.round(weight / scale.unsqueeze(1)), Qmin, Qmax
-        ).to(torch.int8)
+            quantized_weight_chunk = torch.clamp(
+                torch.round(weight_chunk / scale_chunk.unsqueeze(1)), Qmin, Qmax
+            ).to(torch.int8)
 
-        self.weight = quantized_weight
-        self.scale = scale
+            self.weight[i:i+chunk_size, :] = quantized_weight_chunk
+            self.scale[i:i+chunk_size] = scale_chunk
+
+            # Free memory from the chunk
+            del weight_chunk, scale_chunk, quantized_weight_chunk
+            torch.cuda.empty_cache()
 
     def forward(self, input):
         output = F.linear(input, self.weight.to(input.dtype)) * self.scale
@@ -66,52 +64,43 @@ class QuantizedInt8LinearLayer(nn.Module):
 
 
 def replace_linearlayer_custom_qint8(
-    base_model, quantizer_class, exclude_list, quantized=True
+    base_model, quantizer_class, exclude_list=None, quantized=True
 ):
-    # Convert the exclude list to a set for faster lookup
-    exclude_set = set(exclude_list)
+    if exclude_list is None:
+        exclude_list = []
 
-    # Assume model is on GPU, get device
     device = next(base_model.parameters()).device
 
-    # Iterate over named modules directly for in-place replacement
+    # Iterate through all named modules in the model
     for name, module in base_model.named_modules():
-        # Skip layers in the exclude list
-        if any(excl in name for excl in exclude_set):
-            continue
+        if name in exclude_list:
+            continue  # Skip the layer if it's in the exclude list
 
-        # Only process nn.Linear layers
-        if isinstance(module, nn.Linear):
-            layer_name = name.split(".")[-1]
-            parent_module = base_model
-            sub_names = name.split(".")
-            for sub_name in sub_names[:-1]:
-                parent_module = getattr(parent_module, sub_name)
+        if hasattr(module, 'attention'):
+            attention = module.attention
 
-            # Fetch module parameters
-            old_weight = module.weight.data
-            old_bias = module.bias.data if module.bias is not None else None
-            in_features = module.in_features
-            out_features = module.out_features
+            # Replace the attention layers
+            for attr in ['wq', 'wk', 'wv', 'wo']:
+                old_layer = getattr(attention, attr)
+                new_layer = quantizer_class(
+                    old_layer.in_features, old_layer.out_features, bias=False, dtype=old_layer.weight.dtype
+                )
+                if quantized:
+                    new_layer.quantize(old_layer.weight.data.cpu())
+                setattr(attention, attr, new_layer.to(device))
 
-            # Initialize the quantizer layer directly on GPU
-            quantizer_layer = quantizer_class(
-                in_features, out_features, old_bias is not None, old_weight.dtype
-            ).to(device)
+        if hasattr(module, 'feed_forward'):
+            feed_forward = module.feed_forward
 
-            # Quantize weights directly on GPU
-            if quantized:
-                quantizer_layer.quantize(old_weight)
-
-            # Restore bias if it exists
-            if old_bias is not None:
-                quantizer_layer.bias.data.copy_(old_bias)
-
-            # Replace the original Linear layer with the quantizer layer in-place
-            setattr(parent_module, layer_name, quantizer_layer)
-
-            # Remove old references to free memory
-            del old_weight, old_bias
+            # Replace the feed-forward layers
+            for attr in ['w1', 'w2', 'w3']:
+                old_layer = getattr(feed_forward, attr)
+                new_layer = quantizer_class(
+                    old_layer.in_features, old_layer.out_features, bias=False, dtype=old_layer.weight.dtype
+                )
+                if quantized:
+                    new_layer.quantize(old_layer.weight.data.cpu())
+                setattr(feed_forward, attr, new_layer.to(device))
 
 
 class QuantizedInt8LinearDynamicActivationLayer(nn.Module):
@@ -242,6 +231,7 @@ class Quantizer:
         self.quantized_path = (
             Path(ckpt_dir) / f"quantized_model_{quantization_type}.pth"
         )
+        self.device = next(model.parameters()).device
 
     def quantize_based_on_type(self, custom_quantize=True):
         torch.cuda.nvtx.range_push(f"quantize_based_on_type_{self.quantization_type}") 
@@ -347,5 +337,8 @@ class Quantizer:
 
         # Clear CUDA memory after loading the model
         torch.cuda.empty_cache()
+        
+        # Print Model Architecture
+        print_model_architecture(self.model)
 
         return self.model

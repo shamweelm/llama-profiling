@@ -90,6 +90,9 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
+        # Clear CUDA memory before loading the model
+        torch.cuda.empty_cache()
+        
         torch.cuda.nvtx.range_push("build_Llama")
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group("nccl")

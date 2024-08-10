@@ -127,7 +127,7 @@ class Llama:
         # with torch.device("meta"): 
             # model = Transformer(model_args)
         with torch.device("cuda"):
-            model = Transformer(model_args).half()
+            model = Transformer(model_args)
         
         # model = model.to(torch.bfloat16)
         # Set model to eval mode
@@ -145,6 +145,7 @@ class Llama:
             quantizer = Quantizer(model, quantization, ckpt_dir)
             model = quantizer.quantize()
             print(f"Max memory usage after quantization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+            model = model.to("cuda")
             torch.cuda.nvtx.range_pop()
         else:
             torch.cuda.nvtx.range_push("load_weights")
@@ -159,15 +160,16 @@ class Llama:
             torch.cuda.nvtx.range_pop()
             print(f"Max memory usage after loading state dict: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
             
-            del checkpoint
+            # del checkpoint
             # Clear CUDA memory after loading the model
             torch.cuda.empty_cache()
             torch.cuda.nvtx.range_pop()
             
+            # Move the model to CUDA and set the tensor type to half precision
+            model = model.to("cuda")
+            model = model.half()
+            
         print(f"Model loaded with weights at : {datetime.now()}") 
-        
-        # Move the model to CUDA and set the tensor type to bfloat16
-        model = model.to("cuda:0")
         
         # Check tensor devices
         check_tensors_on_device(model, "cuda:0")

@@ -159,7 +159,8 @@ class Llama:
             torch.cuda.nvtx.range_pop()
         
         # Move the model to CUDA and set the tensor type to bfloat16
-        model = model.to("cuda").to(torch.bfloat16)
+        model = model.to("cuda")
+        model = model.to(torch.bfloat16)
         
         # Check tensor devices
         check_tensors_on_device(model, "cuda")

@@ -75,6 +75,7 @@ class Quantizer:
             ckpt_path = [ckpt for ckpt in checkpoints if ckpt.name.endswith("consolidated.00.pth")][0]
             checkpoint = load_checkpoint(ckpt_path)
             self.model.load_state_dict(checkpoint, strict=False, assign=True)
+            # Change model dtype to bfloat16
             self.quantize_based_on_type()
             # Update self.model
             self.save_quantized_model(self.model)
@@ -82,4 +83,4 @@ class Quantizer:
         # Clear CUDA memory after loading the model
         torch.cuda.empty_cache()
         
-        return model
+        return self.model

@@ -153,9 +153,10 @@ class Llama:
             ckpt_path = [ckpt for ckpt in checkpoints if ckpt.name.endswith("consolidated.00.pth")][0]
             checkpoint = load_checkpoint(ckpt_path)
             
-            # Load the weights in bf16
+            # Load the weights
+            torch.cuda.nvtx.range_push("model_load_state_dict")
             model.load_state_dict(checkpoint, assign=True, strict=False)
-            
+            torch.cuda.nvtx.range_pop()
             print(f"Max memory usage after loading state dict: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
             
             del checkpoint

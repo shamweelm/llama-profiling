@@ -295,7 +295,9 @@ class Quantizer:
 
         # Load the quantized model
         checkpoint = load_checkpoint(self.quantized_path, weights_only=False)
+        torch.cuda.nvtx.range_push("model_load_state_dict")
         self.model.load_state_dict(checkpoint, strict=False, assign=True)
+        torch.cuda.nvtx.range_pop()
         del checkpoint
         torch.cuda.nvtx.range_pop()
         return self.model
@@ -335,8 +337,10 @@ class Quantizer:
                 if ckpt.name.endswith("consolidated.00.pth")
             ][0]
             checkpoint = load_checkpoint(ckpt_path)
+            torch.cuda.nvtx.range_push("model_load_state_dict")
             self.model.load_state_dict(checkpoint, strict=False, assign=True)
-            # Change model dtype to bfloat16
+            torch.cuda.nvtx.range_pop()
+            # Quantize the model based on the specified quantization type
             self.quantize_based_on_type(custom_quantize=True)
             # Update self.model
             self.save_quantized_model(self.model)

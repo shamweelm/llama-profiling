@@ -7,9 +7,8 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
-from llama.quantize import get_memory_footprint, quantize_model
-
-from torchao.dtypes import to_affine_quantized
+from llama.quantize import Quantizer
+from llama.utils import check_tensors_on_device, model_memory_footprint, load_checkpoint, print_model_architecture
 
 
 import torch
@@ -91,6 +90,7 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
+        torch.cuda.nvtx.range_push("build_Llama")
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group("nccl")
         if not model_parallel_is_initialized():
@@ -108,19 +108,8 @@ class Llama:
             sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        assert model_parallel_size == len(
-            checkpoints
-        ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
-        ckpt_path = checkpoints[get_model_parallel_rank()]
-        # Load the quantized model if it exists
-        quantized_ckpt_path = Path(ckpt_dir) / f"quantized_model_{quantization}.pth"
-        if quantization is not None and quantized_ckpt_path.exists():
-            print(f"Loading quantized model from {quantized_ckpt_path} as it exists")
-            ckpt_path = quantized_ckpt_path
-        
-        checkpoint = torch.load(ckpt_path, map_location="cuda")
+        torch.cuda.nvtx.range_push("initialize_model")
+        model_init_start_time = time.time()
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -132,42 +121,60 @@ class Llama:
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
         # torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        model = Transformer(model_args)
+        # model = Transformer(model_args)
         
-        print(f"Max memory usage: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        # Faster model initialization with torch.device("cuda")
+        # with torch.device("meta"): 
+            # model = Transformer(model_args)
+        with torch.device("cuda"):
+            model = Transformer(model_args)
+        model_init_end_time = time.time()
+        print(f"Model initialization took {model_init_end_time - model_init_start_time} seconds")
+        torch.cuda.nvtx.range_pop()
         
-        # Print the model architecture
-        print("Model architecture:")
-        print(model)
-        
-        # Get model memory footprint
-        memory_footprint = get_memory_footprint(model)
-        print(f"Model memory footprint: {memory_footprint:.2f} MB")
-        
-        # Load the weights in bf16
-        # model.load_state_dict(checkpoint, strict=False)
-        model.load_state_dict(checkpoint, strict=False)
-        model = model.to(torch.bfloat16)
-        del checkpoint
-        
-        # Clear CUDA memory after loading the model
-        torch.cuda.empty_cache()
-        
-        print(f"Max memory usage after deleting checkpoint: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        print_model_architecture(model)
+        model_memory_footprint(model)
         
         if quantization is not None:
-            model = quantize_model(model, quantization, ckpt_dir)
-
-        memory_footprint = get_memory_footprint(model)
-        print(f"Model memory footprint after quantization: {memory_footprint:.2f} MB")
+            torch.cuda.nvtx.range_push("model_quantization")
+            quantizer = Quantizer(model, quantization, ckpt_dir)
+            model = quantizer.quantize()
+            print(f"Max memory usage after quantization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+            torch.cuda.nvtx.range_pop()
+        else:
+            torch.cuda.nvtx.range_push("load_weights")
+            checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
+            assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
+            ckpt_path = [ckpt for ckpt in checkpoints if ckpt.name.endswith("consolidated.00.pth")][0]
+            checkpoint = load_checkpoint(ckpt_path)
+            
+            # Load the weights in bf16
+            model.load_state_dict(checkpoint, assign=True, strict=False)
+            
+            print(f"Max memory usage after loading state dict: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+            
+            del checkpoint
+            # Clear CUDA memory after loading the model
+            torch.cuda.empty_cache()
+            torch.cuda.nvtx.range_pop()
         
-        # Move the model to CUDA
+        
         model = model.to("cuda")
+        
+        # Check tensor devices
+        check_tensors_on_device(model, "cuda")
+
+        print(f"Max memory usage now: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        
+        torch.cuda.nvtx.range_push("final_setup")
         
         model = autonvtx(model)
         
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
-
+        torch.cuda.nvtx.range_pop()
+        
+        torch.cuda.nvtx.range_pop()
+        
         return Llama(model, tokenizer)
 
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
@@ -210,6 +217,7 @@ class Llama:
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
+        torch.cuda.nvtx.range_push("prepare_tokens")
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
         assert max_prompt_len <= params.max_seq_len
@@ -221,11 +229,13 @@ class Llama:
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
-
+        torch.cuda.nvtx.range_pop()
+        
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device="cuda")
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
+            torch.cuda.nvtx.range_push("initial_forward")
             logits = self.model.forward(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
                 input=logits.transpose(1, 2),
@@ -233,7 +243,9 @@ class Llama:
                 reduction="none",
                 ignore_index=pad_id,
             )
+            torch.cuda.nvtx.range_pop()
 
+        torch.cuda.nvtx.range_push("generate_loop")
         for cur_pos in range(min_prompt_len, total_len):
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
@@ -261,6 +273,7 @@ class Llama:
             prev_pos = cur_pos
             if all(eos_reached):
                 break
+        torch.cuda.nvtx.range_pop()
         
         # Calculate the number of tokens generated and time taken
         end_time = time.perf_counter()
@@ -279,6 +292,7 @@ class Llama:
         print(f"Time taken: {time_taken:.2f} seconds")
         print(f"Tokens per second: {tokens_per_second:.2f}")
 
+        torch.cuda.nvtx.range_push("return_tokens")
         if logprobs:
             token_logprobs = token_logprobs.tolist()
         out_tokens, out_logprobs = [], []
@@ -296,6 +310,8 @@ class Llama:
                 probs = probs[:eos_idx] if logprobs else None
             out_tokens.append(toks)
             out_logprobs.append(probs)
+        torch.cuda.nvtx.range_pop()
+        
         return (out_tokens, out_logprobs if logprobs else None)
 
     def text_completion(
@@ -327,9 +343,14 @@ class Llama:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
+        torch.cuda.nvtx.range_push("text_completion")
+        
+        torch.cuda.nvtx.range_push("prepare_prompts")
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        torch.cuda.nvtx.range_pop()
+        
         print(f"Time: {datetime.now()} - Starting generation")
         torch.cuda.profiler.start()
         with torch.autograd.profiler.emit_nvtx():
@@ -484,6 +505,7 @@ def sample_top_p(probs, p):
         exceeds the threshold p. The distribution is renormalized based on the selected tokens.
 
     """
+    torch.cuda.nvtx.range_push("sample_top_p")
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
@@ -491,4 +513,5 @@ def sample_top_p(probs, p):
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
+    torch.cuda.nvtx.range_pop()
     return next_token

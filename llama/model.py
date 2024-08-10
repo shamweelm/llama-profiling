@@ -237,6 +237,14 @@ class Attention(nn.Module):
         # )
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
+        # self.cache_k = torch.zeros(
+        #     (
+        #         args.max_batch_size,
+        #         args.max_seq_len,
+        #         self.n_local_kv_heads,
+        #         self.head_dim,
+        #     )
+        # ).cuda()
         self.cache_k = torch.zeros(
             (
                 args.max_batch_size,
@@ -244,7 +252,15 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
+        # self.cache_v = torch.zeros(
+        #     (
+        #         args.max_batch_size,
+        #         args.max_seq_len,
+        #         self.n_local_kv_heads,
+        #         self.head_dim,
+        #     )
+        # ).cuda()
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -252,8 +268,8 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
-
+        )
+        
     def forward(
         self,
         x: torch.Tensor,
@@ -283,8 +299,8 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # self.cache_k = self.cache_k.to(xq)
+        # self.cache_v = self.cache_v.to(xq)
 
         self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
         self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
@@ -477,7 +493,8 @@ class Transformer(nn.Module):
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
+        # self.freqs_cis = self.freqs_cis.to(h.device)
+        self.freqs_cis = self.freqs_cis
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
         mask = None

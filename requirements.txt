@@ -3,3 +3,5 @@ fairscale
 fire
 sentencepiece
 autonvtx
+torchao
+tqdm

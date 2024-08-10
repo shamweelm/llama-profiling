@@ -70,7 +70,7 @@ class Quantizer:
         quantized_path = Path(self.ckpt_dir) / f"quantized_model_{self.quantization_type}.pth"
         
         if quantized_path.exists():
-            model = self.load_quantized_model()
+            return self.load_quantized_model()
         else:
             ckpt_path = [ckpt for ckpt in checkpoints if ckpt.name.endswith("consolidated.00.pth")][0]
             checkpoint = load_checkpoint(ckpt_path)

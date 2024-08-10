@@ -128,7 +128,8 @@ class Llama:
             # model = Transformer(model_args)
         with torch.device("cuda"):
             model = Transformer(model_args).half()
-            
+        
+        # model = model.to(torch.bfloat16)
         # Set model to eval mode
         model = model.eval()
         print(f"Max memory usage after model initialization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
@@ -166,7 +167,6 @@ class Llama:
         
         # Move the model to CUDA and set the tensor type to bfloat16
         model = model.to("cuda:0")
-        model = model.to(torch.bfloat16)
         
         # Check tensor devices
         check_tensors_on_device(model, "cuda:0")

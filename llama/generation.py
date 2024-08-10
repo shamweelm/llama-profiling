@@ -159,7 +159,7 @@ class Llama:
             torch.cuda.nvtx.range_pop()
         
         
-        model = model.to("cuda")
+        model = model.to("cuda").to(torch.bf16)
         
         # Check tensor devices
         check_tensors_on_device(model, "cuda")

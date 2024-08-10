@@ -35,19 +35,19 @@ class Quantizer:
         end_time = time.perf_counter()
         print(f"Quantization took {end_time - start_time} seconds")
         torch.cuda.nvtx.range_pop()
-        return self.model
     
     def load_quantized_model(self):
         torch.cuda.nvtx.range_push("load_quantized_model")
         print(f"Quantized model already exists at {self.quantized_path}")
-        model = self.quantize_based_on_type()
+        self.quantize_based_on_type()
         
         torch.cuda.nvtx.range_push("load_quantized_weights")
         # Load the quantized model
         checkpoint = load_checkpoint(self.quantized_path, weights_only=False)
-        model.load_state_dict(checkpoint, strict=False, assign=True)
+        self.model.load_state_dict(checkpoint, strict=False, assign=True)
+        del checkpoint
         torch.cuda.nvtx.range_pop()
-        return model
+        return self.model
     
     def save_quantized_model(self, model):
         torch.cuda.nvtx.range_push("save_quantized_model")
@@ -74,10 +74,10 @@ class Quantizer:
         else:
             ckpt_path = [ckpt for ckpt in checkpoints if ckpt.name.endswith("consolidated.00.pth")][0]
             checkpoint = load_checkpoint(ckpt_path)
-            model.load_state_dict(checkpoint, strict=False, assign=True)
-            model = self.quantize_based_on_type()
+            self.model.load_state_dict(checkpoint, strict=False, assign=True)
+            self.quantize_based_on_type()
             # Update self.model
-            self.save_quantized_model(model)
+            self.save_quantized_model(self.model)
             
         # Clear CUDA memory after loading the model
         torch.cuda.empty_cache()

@@ -127,10 +127,11 @@ class Llama:
         # with torch.device("meta"): 
             # model = Transformer(model_args)
         with torch.device("cuda"):
-            model = Transformer(model_args)
+            model = Transformer(model_args).half()
             
         # Set model to eval mode
         model = model.eval()
+        print(f"Max memory usage after model initialization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
         model_init_end_time = time.time()
         print(f"Model initialization took {model_init_end_time - model_init_start_time} seconds")
         torch.cuda.nvtx.range_pop()
@@ -160,6 +161,8 @@ class Llama:
             # Clear CUDA memory after loading the model
             torch.cuda.empty_cache()
             torch.cuda.nvtx.range_pop()
+            
+        print(f"Model loaded with weights at : {datetime.now()}") 
         
         # Move the model to CUDA and set the tensor type to bfloat16
         model = model.to("cuda:0")

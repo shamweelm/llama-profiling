@@ -98,7 +98,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
+    # t = torch.arange(end, device=freqs.device)  # type: ignore
+    t = torch.arange(end)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
@@ -493,7 +494,7 @@ class Transformer(nn.Module):
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
+        self.freqs_cis = self.freqs_cis.to(tokens.device)
         # self.freqs_cis = self.freqs_cis
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 

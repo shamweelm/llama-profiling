@@ -45,9 +45,10 @@ def check_tensors_on_device(model, device):
     Returns:
     - tensors_on_device: Boolean indicating if all tensors are on the specified device.
     """
+    all_params_on_device = True
     params_not_on_device = []
     for name, param in model.named_parameters():
-        if param.device != device:
+        if device not in str(param.device):
             all_params_on_device = False
             params_not_on_device.append(name)
 

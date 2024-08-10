@@ -44,7 +44,7 @@ class Quantizer:
         
         torch.cuda.nvtx.range_push("load_quantized_weights")
         # Load the quantized model
-        checkpoint = load_checkpoint(self.quantized_path)
+        checkpoint = load_checkpoint(self.quantized_path, weights_only=False)
         model.load_state_dict(checkpoint, strict=False, assign=True)
         torch.cuda.nvtx.range_pop()
         return model

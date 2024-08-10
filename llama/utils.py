@@ -1,9 +1,9 @@
 import torch
 import time
 
-def load_checkpoint(ckpt_path):
+def load_checkpoint(ckpt_path, weights_only=True):
     ckpt_start_time = time.time()
-    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=True)
+    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=weights_only)
     ckpt_end_time = time.time()
     print(f"Loading weights took {ckpt_end_time - ckpt_start_time} seconds")
     return checkpoint

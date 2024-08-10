@@ -48,4 +48,10 @@ def check_tensors_on_device(model, device):
     tensors_on_device = all(param.device == device for param in model.parameters())
     print(f"All tensors on device {device}: {tensors_on_device}")
     
+    if not tensors_on_device:
+        # Print param and its device if it's not on the specified device
+        for param, name in model.named_parameters():
+            if param.device != device:
+                print(f"Parameter {name} is on device {param.device}")
+    
     return tensors_on_device

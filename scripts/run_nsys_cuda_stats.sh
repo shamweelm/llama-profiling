@@ -25,7 +25,7 @@ fi
 # $cmd
 # echo "nvtx_gpu_proj_sum completed."
 
-cmd="nsys stats -r cuda_api_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH}"
+cmd="nsys stats -r cuda_api_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH} --force-overwrite true"
 echo $cmd
 $cmd
 echo "cuda_api_trace completed."
@@ -60,7 +60,7 @@ echo "cuda_api_trace completed."
 # $cmd
 # echo "cuda_gpu_sum completed."
 
-cmd="nsys stats -r cuda_gpu_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH}"
+cmd="nsys stats -r cuda_gpu_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH} --force-overwrite true"
 echo $cmd
 $cmd
 echo "cuda_gpu_trace completed."
@@ -71,7 +71,7 @@ echo "cuda_gpu_trace completed."
 # $cmd
 # echo "cuda_kern_exec_sum completed."
 
-cmd="nsys stats -r cuda_kern_exec_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH}"
+cmd="nsys stats -r cuda_kern_exec_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH} --force-overwrite true"
 echo $cmd
 $cmd
 echo "cuda_kern_exec_trace completed."

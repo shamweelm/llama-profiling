@@ -24,7 +24,7 @@ fi
 # $cmd
 # echo "nvtx_gpu_proj_sum completed."
 
-cmd="nsys stats -r nvtx_gpu_proj_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH}"
+cmd="nsys stats -r nvtx_gpu_proj_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH} --force-overwrite true"
 echo $cmd
 $cmd
 echo "nvtx_gpu_proj_trace completed."
@@ -34,7 +34,7 @@ echo "nvtx_gpu_proj_trace completed."
 # $cmd
 # echo "nvtx_pushpop_sum completed."
 
-cmd="nsys stats -r nvtx_pushpop_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH}"
+cmd="nsys stats -r nvtx_pushpop_trace -f csv --output ${OUTPUT_DIR}/${TASK_NAME} ${INPUT_PATH} --force-overwrite true"
 echo $cmd
 $cmd
 echo "nvtx_pushpop_trace completed."
@@ -57,4 +57,4 @@ echo "nvtx_pushpop_trace completed."
 # Usage
 # chmod +x run_nsys_nvtx_stats.sh
 # ./run_nsys_nvtx_stats.sh <output_dir> <input_file> <task_name>
-# ./run_nsys_nvtx_stats.sh /path/to/output/directory /path/to/nsys_profile.sqlite task_name
+# ./run_nsys_nvtx_stats.sh /path/to/output/directory /path/to/nsys_profile.sqlite task_name true

@@ -111,3 +111,12 @@ def initial_setup(seed, model_parallel_size=None):
         sys.stdout = open(os.devnull, "w")
     
     torch.cuda.nvtx.range_pop()
+    
+
+def synchronise_cuda():
+    torch.cuda.nvtx.range_push("synchronise_cuda")
+    start_time_sync = time.time()
+    torch.cuda.synchronize()
+    end_time_sync = time.time()
+    print(f"CUDA Sync took {end_time_sync - start_time_sync:.2f} seconds")
+    torch.cuda.nvtx.range_pop()

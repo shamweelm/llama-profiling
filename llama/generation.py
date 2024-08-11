@@ -11,7 +11,7 @@ from llama.initialize import EmptyInitOnDevice
 from llama.quantize import Quantizer
 from llama.utils import (
     check_tensors_on_device, model_memory_footprint, load_checkpoint,
-    move_model_to_cuda, print_model_architecture, initial_setup
+    move_model_to_cuda, print_model_architecture, initial_setup, synchronise_cuda
 )
 
 
@@ -200,6 +200,9 @@ class Llama:
         torch.cuda.nvtx.range_pop()
         
         torch.cuda.nvtx.range_pop()
+        
+        # Stream synchronization
+        synchronise_cuda()
         
         return Llama(model, tokenizer)
 

@@ -73,14 +73,18 @@ def replace_linearlayer_custom_qint8(
 
     # Iterate through all named modules in the model
     for name, module in base_model.named_modules():
-        if name in exclude_list:
-            continue  # Skip the layer if it's in the exclude list
+        if any(exclude in name for exclude in exclude_list):
+            continue  # Skip the layer if its name matches any in the exclude list
 
         if hasattr(module, 'attention'):
             attention = module.attention
 
             # Replace the attention layers
             for attr in ['wq', 'wk', 'wv', 'wo']:
+                layer_name = f"{name}.attention.{attr}"
+                if any(exclude in layer_name for exclude in exclude_list):
+                    continue  # Skip if this specific layer is in the exclude list
+
                 old_layer = getattr(attention, attr)
                 new_layer = quantizer_class(
                     old_layer.in_features, old_layer.out_features, bias=False, dtype=old_layer.weight.dtype
@@ -94,6 +98,10 @@ def replace_linearlayer_custom_qint8(
 
             # Replace the feed-forward layers
             for attr in ['w1', 'w2', 'w3']:
+                layer_name = f"{name}.feed_forward.{attr}"
+                if any(exclude in layer_name for exclude in exclude_list):
+                    continue  # Skip if this specific layer is in the exclude list
+
                 old_layer = getattr(feed_forward, attr)
                 new_layer = quantizer_class(
                     old_layer.in_features, old_layer.out_features, bias=False, dtype=old_layer.weight.dtype
@@ -101,6 +109,19 @@ def replace_linearlayer_custom_qint8(
                 if quantized:
                     new_layer.quantize(old_layer.weight.data.cpu())
                 setattr(feed_forward, attr, new_layer.to(device))
+        
+        if hasattr(module, 'output'):
+            layer_name = f"{name}.output"
+            if any(exclude in layer_name for exclude in exclude_list):
+                continue  # Skip if this specific layer is in the exclude list
+
+            old_layer = module.output
+            new_layer = quantizer_class(
+                old_layer.in_features, old_layer.out_features, bias=False, dtype=old_layer.weight.dtype
+            )
+            if quantized:
+                new_layer.quantize(old_layer.weight.data.cpu())
+            setattr(module, 'output', new_layer.to(device))
 
 
 class QuantizedInt8LinearDynamicActivationLayer(nn.Module):
@@ -337,8 +358,5 @@ class Quantizer:
 
         # Clear CUDA memory after loading the model
         torch.cuda.empty_cache()
-        
-        # Print Model Architecture
-        print_model_architecture(self.model)
 
         return self.model

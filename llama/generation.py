@@ -150,6 +150,8 @@ class Llama:
             print(f"Max memory usage after quantization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
             model = model.to("cuda")
             torch.cuda.nvtx.range_pop()
+            # Print Model Architecture
+            print_model_architecture(model)
         else:
             torch.cuda.nvtx.range_push("load_weights")
             checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))

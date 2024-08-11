@@ -1,5 +1,12 @@
 import torch
 import time
+from fairscale.nn.model_parallel.initialize import (
+    get_model_parallel_rank,
+    initialize_model_parallel,
+    model_parallel_is_initialized,
+)
+import os
+import sys
 
 def load_checkpoint(ckpt_path, weights_only=True):
     torch.cuda.nvtx.range_push("load_checkpoint")
@@ -81,3 +88,26 @@ def move_model_to_cuda(model):
     torch.cuda.nvtx.range_pop()
     
     return model
+
+def initial_setup(seed, model_parallel_size=None):
+    torch.cuda.nvtx.range_push("initial_setup")
+    # Clear CUDA memory before loading the model
+    torch.cuda.empty_cache()
+        
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group("nccl")
+    if not model_parallel_is_initialized():
+        if model_parallel_size is None:
+            model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
+        initialize_model_parallel(model_parallel_size)
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+
+    # seed must be the same in all processes
+    torch.manual_seed(seed)
+
+    if local_rank > 0:
+        sys.stdout = open(os.devnull, "w")
+    
+    torch.cuda.nvtx.range_pop()

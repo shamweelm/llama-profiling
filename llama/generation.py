@@ -9,16 +9,14 @@ from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
 from llama.initialize import EmptyInitOnDevice
 from llama.quantize import Quantizer
-from llama.utils import check_tensors_on_device, model_memory_footprint, load_checkpoint, move_model_to_cuda, print_model_architecture
+from llama.utils import (
+    check_tensors_on_device, model_memory_footprint, load_checkpoint,
+    move_model_to_cuda, print_model_architecture, initial_setup
+)
 
 
 import torch
 import torch.nn.functional as F
-from fairscale.nn.model_parallel.initialize import (
-    get_model_parallel_rank,
-    initialize_model_parallel,
-    model_parallel_is_initialized,
-)
 
 from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
@@ -58,6 +56,66 @@ UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
 
 class Llama:
     @staticmethod
+    def initialize_model_and_tokenizer(ckpt_dir, tokenizer_path, max_seq_len, max_batch_size, init_fast=False):
+        """
+        Initialize the model with the specified checkpoint directory, tokenizer path, and other parameters.
+        Also, load the tokenizer model for text encoding/decoding.
+        
+        Args:
+        - ckpt_dir: The directory containing checkpoint files for the pretrained model.
+        - tokenizer_path: The path to the tokenizer model used for text encoding/decoding.
+        - max_seq_len: The maximum sequence length for input prompts.
+        - max_batch_size: The maximum batch size for generating sequences.
+        - init_fast: A boolean flag indicating whether to use fast initialization.
+        
+        Returns:
+        - model: The initialized model.
+        """
+        
+        torch.cuda.nvtx.range_push("initialize_model")
+        model_init_start_time = time.time()
+        with open(Path(ckpt_dir) / "params.json", "r") as f:
+            params = json.loads(f.read())
+
+        model_args: ModelArgs = ModelArgs(
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
+            **params,
+        )
+        tokenizer = Tokenizer(model_path=tokenizer_path)
+        model_args.vocab_size = tokenizer.n_words
+        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        # Load in eval mode
+        # with torch.no_grad() and torch.device("cpu"):
+        #     model = Transformer(model_args)
+        if init_fast:
+            print("Initializing model with EmptyInitOnDevice")
+            with EmptyInitOnDevice("cpu"):
+                with torch.no_grad():
+                    model = Transformer(model_args)
+        else:
+            print("Initializing model with torch.device('cpu') and torch.no_grad()")
+            with torch.device("cpu"):
+                with torch.no_grad():
+                    model = Transformer(model_args)
+                
+        # Faster model initialization with torch.device("meta")
+        # with torch.device("meta"):
+        #     model = Transformer(model_args)
+        
+        # Faster model initialization with torch.device("cuda")
+        # with torch.device("cuda"):
+        #     model = Transformer(model_args)
+        
+
+        print(f"Max memory usage after model initialization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+        model_init_end_time = time.time()
+        print(f"Model initialization took {model_init_end_time - model_init_start_time} seconds")
+        torch.cuda.nvtx.range_pop()
+        
+        return model, tokenizer
+    
+    @staticmethod
     def build(
         ckpt_dir: str,
         tokenizer_path: str,
@@ -91,63 +149,13 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
-        # Clear CUDA memory before loading the model
-        torch.cuda.empty_cache()
-        
         torch.cuda.nvtx.range_push("build_Llama")
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group("nccl")
-        if not model_parallel_is_initialized():
-            if model_parallel_size is None:
-                model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
-            initialize_model_parallel(model_parallel_size)
-
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-
-        # seed must be the same in all processes
-        torch.manual_seed(seed)
-
-        if local_rank > 0:
-            sys.stdout = open(os.devnull, "w")
+        
+        # Initial setup
+        initial_setup(seed, model_parallel_size)
 
         start_time = time.time()
-        torch.cuda.nvtx.range_push("initialize_model")
-        model_init_start_time = time.time()
-        with open(Path(ckpt_dir) / "params.json", "r") as f:
-            params = json.loads(f.read())
-
-        model_args: ModelArgs = ModelArgs(
-            max_seq_len=max_seq_len,
-            max_batch_size=max_batch_size,
-            **params,
-        )
-        tokenizer = Tokenizer(model_path=tokenizer_path)
-        model_args.vocab_size = tokenizer.n_words
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        # Load in eval mode
-        # with torch.no_grad() and torch.device("cpu"):
-        #     model = Transformer(model_args)
-        if init_fast:
-            with EmptyInitOnDevice("cpu") and torch.no_grad():
-                model = Transformer(model_args)
-        else:
-            with torch.device("cpu") and torch.no_grad():
-                model = Transformer(model_args)
-                
-        # Faster model initialization with torch.device("meta")
-        # with torch.device("meta"):
-        #     model = Transformer(model_args)
-        
-        # Faster model initialization with torch.device("cuda")
-        # with torch.device("cuda"):
-        #     model = Transformer(model_args)
-        
-
-        print(f"Max memory usage after model initialization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
-        model_init_end_time = time.time()
-        print(f"Model initialization took {model_init_end_time - model_init_start_time} seconds")
-        torch.cuda.nvtx.range_pop()
+        model, tokenizer = Llama.initialize_model_and_tokenizer(ckpt_dir, tokenizer_path, max_seq_len, max_batch_size, init_fast)
         
         print_model_architecture(model)
         model_memory_footprint(model)
@@ -174,9 +182,6 @@ class Llama:
             torch.cuda.nvtx.range_pop()
             print(f"Max memory usage after loading state dict: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
             
-            # del checkpoint
-            # Clear CUDA memory after loading the model
-            torch.cuda.empty_cache()
             torch.cuda.nvtx.range_pop()
             
             # Move the model to CUDA and set the tensor type to half precision

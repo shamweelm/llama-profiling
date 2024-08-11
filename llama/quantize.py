@@ -340,7 +340,8 @@ class Quantizer:
         )
 
         if quantized_path.exists():
-            return self.load_quantized_model(custom_quantize=False)
+            self.model = self.load_quantized_model(custom_quantize=False)
+            torch.cuda.nvtx.range_pop()
         else:
             ckpt_path = [
                 ckpt

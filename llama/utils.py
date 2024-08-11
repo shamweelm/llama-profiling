@@ -4,7 +4,7 @@ import time
 def load_checkpoint(ckpt_path, weights_only=True):
     torch.cuda.nvtx.range_push("load_checkpoint")
     ckpt_start_time = time.time()
-    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=weights_only)
+    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=weights_only, pinned_memory=True)
     ckpt_end_time = time.time()
     print(f"Loading weights took {ckpt_end_time - ckpt_start_time} seconds")
     torch.cuda.nvtx.range_pop()
@@ -62,3 +62,22 @@ def check_tensors_on_device(model, device):
             print(f"- {param_name}")
     
     return all_params_on_device
+
+def move_model_to_cuda(model):
+    """
+    Function to move a PyTorch model to the GPU (if available).
+    
+    Parameters:
+    - model: PyTorch model.
+    
+    Returns:
+    - model: PyTorch model moved to the GPU.
+    """
+    torch.cuda.nvtx.range_push("move_model_to_cuda")
+    start_time_cuda = time.time()
+    model = model.to("cuda")
+    end_time_cuda = time.time()
+    print(f"Model moved to CUDA in {end_time_cuda - start_time_cuda:.2f} seconds")
+    torch.cuda.nvtx.range_pop()
+    
+    return model

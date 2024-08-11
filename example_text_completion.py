@@ -19,6 +19,7 @@ def main(
     max_gen_len: int = 64,
     max_batch_size: int = 4,
     quantization: str = None,
+    init_fast: bool = False,
 ):
     """
     Entry point of the program for generating text using a pretrained model.
@@ -40,6 +41,7 @@ def main(
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
         quantization=quantization,
+        init_fast=init_fast,
     )
 
     prompts: List[str] = [

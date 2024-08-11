@@ -7,8 +7,9 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
+from llama.initialize import EmptyInitOnDevice
 from llama.quantize import Quantizer
-from llama.utils import check_tensors_on_device, model_memory_footprint, load_checkpoint, print_model_architecture
+from llama.utils import check_tensors_on_device, model_memory_footprint, load_checkpoint, move_model_to_cuda, print_model_architecture
 
 
 import torch
@@ -64,8 +65,8 @@ class Llama:
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
-        # quantization: Optional None
         quantization: Optional[str] = None,
+        init_fast: bool = False,
     ) -> "Llama":
         """
         Build a Llama instance by initializing and loading a pre-trained model.
@@ -123,18 +124,26 @@ class Llama:
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
-        # torch.set_default_tensor_type(torch.cuda.HalfTensor)
-        # model = Transformer(model_args)
+        torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        # Load in eval mode
+        # with torch.no_grad() and torch.device("cpu"):
+        #     model = Transformer(model_args)
+        if init_fast:
+            with EmptyInitOnDevice("cpu") and torch.no_grad():
+                model = Transformer(model_args)
+        else:
+            with torch.device("cpu") and torch.no_grad():
+                model = Transformer(model_args)
+                
+        # Faster model initialization with torch.device("meta")
+        # with torch.device("meta"):
+        #     model = Transformer(model_args)
         
         # Faster model initialization with torch.device("cuda")
-        # with torch.device("meta"): 
-            # model = Transformer(model_args)
-        with torch.device("cuda"):
-            model = Transformer(model_args)
+        # with torch.device("cuda"):
+        #     model = Transformer(model_args)
         
-        # model = model.to(torch.bfloat16)
-        # Set model to eval mode
-        model = model.eval()
+
         print(f"Max memory usage after model initialization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
         model_init_end_time = time.time()
         print(f"Model initialization took {model_init_end_time - model_init_start_time} seconds")
@@ -148,7 +157,7 @@ class Llama:
             quantizer = Quantizer(model, quantization, ckpt_dir)
             model = quantizer.quantize()
             print(f"Max memory usage after quantization: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
-            model = model.to("cuda")
+            model = move_model_to_cuda(model)
             torch.cuda.nvtx.range_pop()
             # Print Model Architecture
             print_model_architecture(model)
@@ -171,8 +180,7 @@ class Llama:
             torch.cuda.nvtx.range_pop()
             
             # Move the model to CUDA and set the tensor type to half precision
-            model = model.to("cuda")
-            model = model.half()
+            model = move_model_to_cuda(model)
             
         print(f"Model loaded with weights at : {datetime.now()}") 
         
@@ -182,9 +190,7 @@ class Llama:
         print(f"Max memory usage now: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
         
         torch.cuda.nvtx.range_push("final_setup")
-        
         model = autonvtx(model)
-        
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
         torch.cuda.nvtx.range_pop()
         

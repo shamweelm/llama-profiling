@@ -4,7 +4,7 @@ import time
 def load_checkpoint(ckpt_path, weights_only=True):
     torch.cuda.nvtx.range_push("load_checkpoint")
     ckpt_start_time = time.time()
-    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=weights_only, pinned_memory=True)
+    checkpoint = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=weights_only)
     ckpt_end_time = time.time()
     print(f"Loading weights took {ckpt_end_time - ckpt_start_time} seconds")
     torch.cuda.nvtx.range_pop()
